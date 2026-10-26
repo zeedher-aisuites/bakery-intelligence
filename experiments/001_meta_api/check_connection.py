@@ -36,15 +36,26 @@ def main():
 
         data = response.json()
 
+        model_ids = [
+            model.get("id")
+            for model in data.get("data", [])
+        ]
+
+        if MODEL not in model_ids:
+            print(f"ERROR: El modelo {MODEL} no está disponible.")
+            sys.exit(1)
+
         for model in data.get("data", []):
             print(" -", model.get("id", "Sin identificador"))
 
     except httpx.HTTPStatusError as exc:
         print("Error HTTP:", exc.response.status_code)
         print("Detalle:", exc.response.text[:1000])
+        sys.exit(1)
 
     except httpx.RequestError as exc:
         print("Error de conexión:", str(exc))
+        sys.exit(1)
 
     # Prueba 2: inferencia mínima
     print("\n[2/2] Probando inferencia con Muse Spark...")
@@ -60,7 +71,7 @@ def main():
         result = client.responses.create(
             model=MODEL,
             input="Reply with exactly: Bakery Intelligence API OK",
-            max_output_tokens=256,
+            max_output_tokens=1024,
         )
 
         print("\n=== DIAGNÓSTICO ===")
@@ -76,20 +87,34 @@ def main():
         if result.usage:
             print("Uso:", result.usage.model_dump())
 
-        print("\nRESULTADO: La API respondió correctamente.")
+        expected_text = "Bakery Intelligence API OK"
+
+        if result.status != "completed":
+            raise RuntimeError(
+                f"Generación incompleta: {result.status}"
+            )
+
+        if result.output_text.strip() != expected_text:
+            raise RuntimeError(
+                f"Respuesta inesperada: {result.output_text!r}"
+            )
+
+        print("\nRESULTADO: EXPERIMENTO APROBADO")
 
     except APIStatusError as exc:
         print("HTTP status:", exc.status_code)
         print("Detalle:", str(exc)[:1000])
         print("\nLa API rechazó la solicitud.")
         print("Revisa si el error corresponde a permisos, modelo o facturación.")
+        sys.exit(1)
 
     except APIConnectionError as exc:
         print("Error de conexión:", str(exc))
+        sys.exit(1)
 
     except Exception as exc:
         print("Error inesperado:", type(exc).__name__, str(exc)[:500])
-
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
