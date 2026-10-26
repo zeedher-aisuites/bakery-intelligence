@@ -1,0 +1,11 @@
+image_filename,ingredient,weight_value,weight_unit,readable,verified,notes
+scale_001.png,chocolate_chips,83.6,g,true,true,
+scale_002.png,sugar,125.0,g,true,true,
+scale_003.png,flour,250.5,g,true,true,
+scale_004.png,flour,250.5,g,true,true,
+scale_005.png,butter,86.3,g,true,true,
+scale_006.png,blueberries,174.0,g,true,true,
+scale_007.png,flour_low_contrast,48.7,g,true,true,Low-contrast display; verify legibility against original image
+scale_008.png,sourdough_starter,287,g,true,true,
+scale_009.png,concha_dough,63.8,g,true,true,
+scale_010.png,levain_cookie_dough,74.2,g,true,true,
