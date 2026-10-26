@@ -1,74 +1,89 @@
+# Experiment 001 — Meta Model API Connectivity
 
-# Experimento 001 — Conexión con Meta Model API
+## Objective
 
-## Objetivo
+Validate that Bakery Intelligence can authenticate with the Meta Model API,
+list available models, and perform text inference using Muse Spark 1.3.
 
-Validar que Bakery Intelligence puede autenticarse en Meta Model API,
-consultar los modelos disponibles y realizar una inferencia de texto
-con Muse Spark 1.3.
+## Date
 
-## Fecha
+October 26, 2026.
 
-26 de octubre de 2026.
+## Environment
 
-## Entorno
-
-- Sistema operativo: Windows
+- Operating system: Windows
 - Python: 3.12
-- Gestor de dependencias: uv
+- Dependency manager: uv
 - SDK: openai (Python)
 - API: Meta Model API
-- Modelo: muse-spark-1.3
-- Endpoint: /v1/responses
+- Model: `muse-spark-1.3`
+- Endpoint: `/v1/responses`
 
-## Configuración
+## Configuration
 
-Prompt utilizado:
+Prompt used:
 
-"Reply with exactly: Bakery Intelligence API OK"
+```text
+Reply with exactly: Bakery Intelligence API OK
+```
 
-Credenciales: variable de entorno MODEL_API_KEY.
+Credentials: `MODEL_API_KEY` environment variable.
 
-## Resultados observados
+## Observed Results
 
-Consulta del catálogo:
-- HTTP 200
-- 9 identificadores de modelos disponibles
+Model catalog request:
+- HTTP status: 200
+- Available model identifiers: 9
 
-Inferencia:
-- Estado: completed
-- Respuesta: Bakery Intelligence API OK
-- Tokens de entrada: 16
-- Tokens de salida: 182
-- Tokens de razonamiento: 168
-- Tokens totales: 198
+Initial successful inference:
+- Status: `completed`
+- Response: `Bakery Intelligence API OK`
+- Input tokens: 16
+- Output tokens: 182
+- Reasoning tokens: 168
+- Total tokens: 198
 
-## Observaciones
+Subsequent successful validation:
+- Status: `completed`
+- Response: `Bakery Intelligence API OK`
+- Input tokens: 16
+- Output tokens: 277
+- Reasoning tokens: 263
+- Total tokens: 293
+- Process exit code: `0`
 
-Las primeras pruebas, con límites de salida de 40 y 256 tokens,
-no generaron texto visible.
+## Observations
 
-La ejecución final terminó correctamente y produjo la respuesta esperada.
+Early tests with output limits of 40 and 256 tokens produced no visible text.
+A subsequent run completed successfully and returned the expected response.
 
-El modelo utiliza parte de su presupuesto de salida en razonamiento.
+The model uses part of its output-token budget for reasoning. Token usage
+varies between requests, even when the prompt is unchanged.
 
-## Conclusión
+The validation script checks that the requested model appears in the model
+catalog, the response status is `completed`, and the returned text matches
+the expected value. Failures result in a nonzero exit code.
 
-Se validó la conexión y una inferencia de texto con Muse Spark 1.3.
+## Conclusion
 
-La cuenta permite utilizar la API y registra consumo de créditos.
+Authentication, model discovery, and text inference with Muse Spark 1.3
+were successfully validated. The account can access the API and usage
+is reflected in the available promotional credits.
 
-Pendiente:
-- Validar inferencia con imágenes.
-- Validar procesamiento de video.
-- Medir latencia y costo por solicitud.
+Next steps:
+- Validate image inference.
+- Validate video processing.
+- Measure latency and cost per request.
+- Add mocked tests for failure scenarios without using API credits.
 
-## Reproducción
+## Reproduction
 
-Desde la raíz del repositorio:
+From the repository root:
 
+```powershell
 uv sync --locked
-
 uv run python experiments/001_meta_api/check_connection.py
+$LASTEXITCODE
+```
 
-Requiere MODEL_API_KEY en el archivo .env.
+Requires `MODEL_API_KEY` in the local `.env` file. Do not commit `.env`.

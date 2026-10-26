@@ -16,13 +16,13 @@ def main():
     api_key = os.getenv("MODEL_API_KEY")
 
     if not api_key:
-        print("ERROR: No se encontró MODEL_API_KEY en .env")
+        print("ERROR: MODEL_API_KEY was not found in .env")
         sys.exit(1)
 
-    print("=== Experimento 001: Meta Model API ===")
+    print("=== Experiment 001: Meta Model API ===")
 
-    # Prueba 1: consultar los modelos disponibles
-    print("\n[1/2] Consultando modelos disponibles...")
+    # Test 1: list available models
+    print("\n[1/2] Listing available models...")
 
     try:
         response = httpx.get(
@@ -36,18 +36,29 @@ def main():
 
         data = response.json()
 
+        model_ids = [
+            model.get("id")
+            for model in data.get("data", [])
+        ]
+
+        if MODEL not in model_ids:
+            print(f"ERROR: Model {MODEL} is not available.")
+            sys.exit(1)
+
         for model in data.get("data", []):
-            print(" -", model.get("id", "Sin identificador"))
+            print(" -", model.get("id", "Missing identifier"))
 
     except httpx.HTTPStatusError as exc:
-        print("Error HTTP:", exc.response.status_code)
-        print("Detalle:", exc.response.text[:1000])
+        print("HTTP error:", exc.response.status_code)
+        print("Details:", exc.response.text[:1000])
+        sys.exit(1)
 
     except httpx.RequestError as exc:
-        print("Error de conexión:", str(exc))
+        print("Connection error:", str(exc))
+        sys.exit(1)
 
-    # Prueba 2: inferencia mínima
-    print("\n[2/2] Probando inferencia con Muse Spark...")
+    # Test 2: minimal inference
+    print("\n[2/2] Testing inference with Muse Spark...")
 
     try:
         client = OpenAI(
@@ -60,35 +71,49 @@ def main():
         result = client.responses.create(
             model=MODEL,
             input="Reply with exactly: Bakery Intelligence API OK",
-            max_output_tokens=256,
+            max_output_tokens=1024,
         )
 
-        print("\n=== DIAGNÓSTICO ===")
-        print("Estado:", result.status)
-        print("Detalles de incompleto:", result.incomplete_details)
-        print("Contenido:", repr(result.output_text))
-        print("Objetos de salida:", result.output)
-        print("Uso:", result.usage.model_dump() if result.usage else None)
+        print("\n=== DIAGNOSTICS ===")
+        print("Status:", result.status)
+        print("Incomplete details:", result.incomplete_details)
+        print("Content:", repr(result.output_text))
+        print("Output objects:", result.output)
 
-        print("Modelo:", result.model)
-        print("Respuesta:", result.output_text)
+        print("Model:", result.model)
+        print("Response:", result.output_text)
 
         if result.usage:
-            print("Uso:", result.usage.model_dump())
+            print("Usage:", result.usage.model_dump())
 
-        print("\nRESULTADO: La API respondió correctamente.")
+        expected_text = "Bakery Intelligence API OK"
+
+        if result.status != "completed":
+            raise RuntimeError(
+                f"Incomplete generation: {result.status}"
+            )
+
+        if result.output_text.strip() != expected_text:
+            raise RuntimeError(
+                f"Unexpected response: {result.output_text!r}"
+            )
+
+        print("\nRESULT: EXPERIMENT PASSED")
 
     except APIStatusError as exc:
         print("HTTP status:", exc.status_code)
-        print("Detalle:", str(exc)[:1000])
-        print("\nLa API rechazó la solicitud.")
-        print("Revisa si el error corresponde a permisos, modelo o facturación.")
+        print("Details:", str(exc)[:1000])
+        print("\nThe API rejected the request.")
+        print("Check whether the error is related to permissions, model access, or billing.")
+        sys.exit(1)
 
     except APIConnectionError as exc:
-        print("Error de conexión:", str(exc))
+        print("Connection error:", str(exc))
+        sys.exit(1)
 
     except Exception as exc:
-        print("Error inesperado:", type(exc).__name__, str(exc)[:500])
+        print("Unexpected error:", type(exc).__name__, str(exc)[:500])
+        sys.exit(1)
 
 
 if __name__ == "__main__":
