@@ -1,3 +1,9 @@
+# Locally stored datasets and source videos
+/data/raw/
+
+# Local video processing artifacts
+/data/processed/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
