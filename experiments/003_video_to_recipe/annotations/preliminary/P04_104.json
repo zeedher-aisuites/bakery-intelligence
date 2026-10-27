@@ -1,0 +1,1000 @@
+{
+  "preliminary_schema_version": "0.1.0",
+  "record_type": "preliminary_human_review",
+  "video_id": "P04_104",
+  "source_dataset": "EPIC-KITCHENS-100",
+  "source_video_filename": "P04_104.MP4",
+  "source_annotation_path": "experiments/003_video_to_recipe/annotations/preliminary/P04_104_manual_observations.md",
+  "source_annotation_commit": "e00dbd1",
+  "annotation_status": "preliminary_not_frame_verified",
+  "timestamp_basis": "approximate_human_video_review",
+  "scale_unit": null,
+  "scale_unit_hypothesis": "g",
+  "frame_count": 34235,
+  "fps": 50,
+  "duration_seconds": 684.7,
+  "interpretation_policy": {
+    "reported_display_values_are_not_net_ingredient_quantities": true,
+    "contextually_inferred_digits_are_not_verified_ocr": true,
+    "model_predictions_must_not_be_used_to_create_reference_labels": true,
+    "missing_frame_evidence_remains_null": true
+  },
+  "segments": [
+    {
+      "segment_id": "S01",
+      "description": "Initial pancake-mixture weighing and tare (00:15–01:28)",
+      "observations": [
+        {
+          "observation_id": "pre_s1_01",
+          "time_label": "00:15",
+          "approximate_timestamp_seconds": 15,
+          "reported_action": "The person begins adding pancake mixture to a glass bowl.",
+          "reported_display_or_state": "Shortly afterward the scale displays `0`.",
+          "interpretation_and_verification_need": "Identify the exact moment of zeroing and whether the bowl is on the scale.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s1_02",
+          "time_label": "~01:18",
+          "approximate_timestamp_seconds": 78,
+          "reported_action": "The bowl is removed from the scale.",
+          "reported_display_or_state": "Last reported maximum reading: `100`.",
+          "interpretation_and_verification_need": "Reading is reported, but its relation to net ingredient mass is not established.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s1_03",
+          "time_label": "After ~01:18",
+          "approximate_timestamp_seconds": 78,
+          "reported_action": "The scale is visible after the bowl is removed.",
+          "reported_display_or_state": "`-750`.",
+          "interpretation_and_verification_need": "Negative reading may reflect an earlier tare/reference; the mechanism is unverified.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s1_04",
+          "time_label": "~01:26",
+          "approximate_timestamp_seconds": 86,
+          "reported_action": "The person places a vessel containing pancake batter on the scale and operates the tare control.",
+          "reported_display_or_state": "Tare action reported.",
+          "interpretation_and_verification_need": "Determine action order and confirm the button press from frames.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s1_05",
+          "time_label": "~01:28",
+          "approximate_timestamp_seconds": 88,
+          "reported_action": "The vessel with batter remains on the scale.",
+          "reported_display_or_state": "`0`.",
+          "interpretation_and_verification_need": "Candidate new measurement baseline.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        }
+      ]
+    },
+    {
+      "segment_id": "S02",
+      "description": "Addition of unidentified dry ingredient (01:35–02:04)",
+      "observations": [
+        {
+          "observation_id": "pre_s2_01",
+          "time_label": "01:35",
+          "approximate_timestamp_seconds": 95,
+          "reported_action": "A substance resembling flour is added to the vessel containing batter.",
+          "reported_display_or_state": "Not reported.",
+          "interpretation_and_verification_need": "Ingredient identity is inferred; flour is not confirmed.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s2_02",
+          "time_label": "~02:04",
+          "approximate_timestamp_seconds": 124,
+          "reported_action": "Addition stops and the vessel is removed from the scale.",
+          "reported_display_or_state": "`29`.",
+          "interpretation_and_verification_need": "Confirm whether the reading occurs before, during, or after vessel removal and whether it is stable.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        }
+      ]
+    },
+    {
+      "segment_id": "S03",
+      "description": "Repeated water addition, stirring, and force artifacts (02:04–03:23)",
+      "observations": [
+        {
+          "observation_id": "pre_s3_01",
+          "time_label": "02:04",
+          "approximate_timestamp_seconds": 124,
+          "reported_action": "Water is added to the vessel while it is off the scale.",
+          "reported_display_or_state": "No scale reading.",
+          "interpretation_and_verification_need": "Confirm visible liquid and vessel position.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_02",
+          "time_label": "02:09",
+          "approximate_timestamp_seconds": 129,
+          "reported_action": "Vessel returns to the scale after water addition, then is removed for more water.",
+          "reported_display_or_state": "`53`.",
+          "interpretation_and_verification_need": "Candidate snapshot after first water addition.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_03",
+          "time_label": "02:13",
+          "approximate_timestamp_seconds": 133,
+          "reported_action": "Vessel returns after additional water, then is removed again.",
+          "reported_display_or_state": "`54–55`.",
+          "interpretation_and_verification_need": "Ambiguous reported reading; do not force a single value.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_04",
+          "time_label": "02:18",
+          "approximate_timestamp_seconds": 138,
+          "reported_action": "Vessel returns after additional water, then is removed again.",
+          "reported_display_or_state": "`56`.",
+          "interpretation_and_verification_need": "Candidate snapshot after additional water.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_05",
+          "time_label": "02:24",
+          "approximate_timestamp_seconds": 144,
+          "reported_action": "Vessel returns after additional water and contents are stirred while on the scale.",
+          "reported_display_or_state": "`60` before stirring; peaks near `600` during stirring.",
+          "interpretation_and_verification_need": "High readings during hand contact are suspected force artifacts, not added mass.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_06",
+          "time_label": "02:33",
+          "approximate_timestamp_seconds": 153,
+          "reported_action": "Vessel is removed; more water is added while stirring continues.",
+          "reported_display_or_state": "Negative numbers visible on the scale.",
+          "interpretation_and_verification_need": "Negative readings with vessel removed are suspected reference/tare artifacts.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_07",
+          "time_label": "02:50",
+          "approximate_timestamp_seconds": 170,
+          "reported_action": "More water is added while stirring continues.",
+          "reported_display_or_state": "Negative numbers visible on the scale.",
+          "interpretation_and_verification_need": "Treat as potential noise; inspect vessel placement and display.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_08",
+          "time_label": "03:00",
+          "approximate_timestamp_seconds": 180,
+          "reported_action": "Vessel is placed on the scale again.",
+          "reported_display_or_state": "Partially occluded `54`, inferred by the reviewer from context.",
+          "interpretation_and_verification_need": "**Do not label `54` as a directly readable number** until verified; retain partial-visibility status.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_09",
+          "time_label": "03:06",
+          "approximate_timestamp_seconds": 186,
+          "reported_action": "After a camera movement, the scale and vessel are visible again; vessel is then removed for cleaning.",
+          "reported_display_or_state": "`69`.",
+          "interpretation_and_verification_need": "Candidate reading; inspect stability and timing.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_10",
+          "time_label": "03:18",
+          "approximate_timestamp_seconds": 198,
+          "reported_action": "Vessel returns to the scale. Plastic film is placed over it.",
+          "reported_display_or_state": "`68` before covering; spurious readings during contact.",
+          "interpretation_and_verification_need": "Verify baseline and identify film-handling force artifacts.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s3_11",
+          "time_label": "03:23",
+          "approximate_timestamp_seconds": 203,
+          "reported_action": "The film-covered vessel is removed and taken to the freezer.",
+          "reported_display_or_state": "Not reported.",
+          "interpretation_and_verification_need": "End of candidate weighing sequence.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        }
+      ]
+    },
+    {
+      "segment_id": "S04",
+      "description": "Powder addition, low battery, replacement, water additions, mixing, and cleanup (03:30–video end)",
+      "observations": [
+        {
+          "observation_id": "pre_s4_01",
+          "time_label": "03:30",
+          "approximate_timestamp_seconds": 210,
+          "reported_action": "Glass bowl is placed on the scale and the scale is tared.",
+          "reported_display_or_state": "`0` around 03:34.",
+          "interpretation_and_verification_need": "Candidate tare and new baseline.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_02",
+          "time_label": "03:45",
+          "approximate_timestamp_seconds": 225,
+          "reported_action": "Person returns after retrieving an ingredient; scale display appears off. Scale is turned on and tared again.",
+          "reported_display_or_state": "Display off, then reinitialized.",
+          "interpretation_and_verification_need": "Confirm whether the same tare baseline is restored.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_03",
+          "time_label": "03:48",
+          "approximate_timestamp_seconds": 228,
+          "reported_action": "Scale is seen through the glass bowl.",
+          "reported_display_or_state": "Noisy/partially obscured `0`.",
+          "interpretation_and_verification_need": "Reading visibility reduced by glass.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_04",
+          "time_label": "03:51",
+          "approximate_timestamp_seconds": 231,
+          "reported_action": "Powder resembling flour or sugar begins to be added.",
+          "reported_display_or_state": "Not reported.",
+          "interpretation_and_verification_need": "Ingredient identity unknown.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_05",
+          "time_label": "04:08",
+          "approximate_timestamp_seconds": 248,
+          "reported_action": "Powder is being added.",
+          "reported_display_or_state": "`448` through glass, followed by `Lo`.",
+          "interpretation_and_verification_need": "`448` is a reported noisy reading, not yet a verified final mass; `Lo` is consistent with low battery but requires display confirmation.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_06",
+          "time_label": "04:09",
+          "approximate_timestamp_seconds": 249,
+          "reported_action": "Ingredient addition stops; display turns off.",
+          "reported_display_or_state": "Display off.",
+          "interpretation_and_verification_need": "Loss of measurement continuity.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_07",
+          "time_label": "04:13",
+          "approximate_timestamp_seconds": 253,
+          "reported_action": "Bowl is removed; person takes the scale elsewhere.",
+          "reported_display_or_state": "Display off.",
+          "interpretation_and_verification_need": "Start of scale interruption.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_08",
+          "time_label": "04:55",
+          "approximate_timestamp_seconds": 295,
+          "reported_action": "Coin-cell-type batteries are found in drawers.",
+          "reported_display_or_state": "Not applicable.",
+          "interpretation_and_verification_need": "Battery purpose inferred from subsequent actions.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_09",
+          "time_label": "05:13",
+          "approximate_timestamp_seconds": 313,
+          "reported_action": "First battery of the scale is changed.",
+          "reported_display_or_state": "Not applicable.",
+          "interpretation_and_verification_need": "Physical maintenance event.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_10",
+          "time_label": "05:40",
+          "approximate_timestamp_seconds": 340,
+          "reported_action": "Second battery is changed; scale display subsequently turns on.",
+          "reported_display_or_state": "Display on.",
+          "interpretation_and_verification_need": "New power session; reference continuity not assumed.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_11",
+          "time_label": "06:07",
+          "approximate_timestamp_seconds": 367,
+          "reported_action": "Glass bowl containing the powder is placed on the scale and scale is tared.",
+          "reported_display_or_state": "`0`.",
+          "interpretation_and_verification_need": "**New measurement reference**; pre-battery readings cannot simply be added to post-tare readings.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_12",
+          "time_label": "06:19",
+          "approximate_timestamp_seconds": 379,
+          "reported_action": "Water is poured into a second vessel resembling a ladle.",
+          "reported_display_or_state": "Not reported.",
+          "interpretation_and_verification_need": "Water identity reported by reviewer; check visual evidence.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_13",
+          "time_label": "06:22",
+          "approximate_timestamp_seconds": 382,
+          "reported_action": "Water is poured from the second vessel into the glass bowl.",
+          "reported_display_or_state": "Not reported.",
+          "interpretation_and_verification_need": "The reviewer proposes ~`448` as the last powder reading before power loss; this remains an inference, not verified net powder mass.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_14",
+          "time_label": "06:24",
+          "approximate_timestamp_seconds": 384,
+          "reported_action": "More water is placed in the second vessel.",
+          "reported_display_or_state": "`38`.",
+          "interpretation_and_verification_need": "Candidate cumulative post-tare reading.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_15",
+          "time_label": "06:27",
+          "approximate_timestamp_seconds": 387,
+          "reported_action": "Water is poured into the glass bowl; more water is prepared.",
+          "reported_display_or_state": "`108`.",
+          "interpretation_and_verification_need": "Candidate cumulative post-tare reading.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_16",
+          "time_label": "06:32",
+          "approximate_timestamp_seconds": 392,
+          "reported_action": "More water is poured; additional water is prepared.",
+          "reported_display_or_state": "`167`.",
+          "interpretation_and_verification_need": "Candidate cumulative post-tare reading.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_17",
+          "time_label": "06:35",
+          "approximate_timestamp_seconds": 395,
+          "reported_action": "More water is poured; additional water is prepared.",
+          "reported_display_or_state": "`238`.",
+          "interpretation_and_verification_need": "Candidate cumulative post-tare reading.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_18",
+          "time_label": "06:40",
+          "approximate_timestamp_seconds": 400,
+          "reported_action": "More water is poured.",
+          "reported_display_or_state": "`286`.",
+          "interpretation_and_verification_need": "Candidate cumulative post-tare reading.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_19",
+          "time_label": "06:45",
+          "approximate_timestamp_seconds": 405,
+          "reported_action": "Water is poured; the person attempts to remove some water.",
+          "reported_display_or_state": "Maximum reported `319`.",
+          "interpretation_and_verification_need": "Maximum is not necessarily the final water quantity.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_20",
+          "time_label": "06:48",
+          "approximate_timestamp_seconds": 408,
+          "reported_action": "Some contents are removed, but removal itself is not clearly visible.",
+          "reported_display_or_state": "`315`.",
+          "interpretation_and_verification_need": "Candidate corrected reading; removed substance/amount not directly verified.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_21",
+          "time_label": "06:51",
+          "approximate_timestamp_seconds": 411,
+          "reported_action": "A new ingredient is added to the bowl.",
+          "reported_display_or_state": "`315` before addition.",
+          "interpretation_and_verification_need": "Ingredient identity unknown; transition to a new addition.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_22",
+          "time_label": "06:57",
+          "approximate_timestamp_seconds": 417,
+          "reported_action": "Addition of the new ingredient ends.",
+          "reported_display_or_state": "Brief `323`.",
+          "interpretation_and_verification_need": "Difference from `315` is a candidate net change of 8 display units **only if** reference and stability are confirmed.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_23",
+          "time_label": "07:05",
+          "approximate_timestamp_seconds": 425,
+          "reported_action": "Person retrieves a knife and begins mixing contents on the scale.",
+          "reported_display_or_state": "`323` visible again immediately before mixing.",
+          "interpretation_and_verification_need": "Readings during subsequent mixing are suspected contact-force artifacts.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_24",
+          "time_label": "08:03",
+          "approximate_timestamp_seconds": 483,
+          "reported_action": "Mixing stops; knife is removed.",
+          "reported_display_or_state": "`320`.",
+          "interpretation_and_verification_need": "Reviewer hypothesizes that material adhered to the knife; cause of decrease not independently established.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_25",
+          "time_label": "08:09",
+          "approximate_timestamp_seconds": 489,
+          "reported_action": "Bowl is covered with a yellow cloth and removed from the scale.",
+          "reported_display_or_state": "Not reported.",
+          "interpretation_and_verification_need": "End of mixing/weighing sequence.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_26",
+          "time_label": "08:16",
+          "approximate_timestamp_seconds": 496,
+          "reported_action": "While holding the covered bowl, person operates scale control.",
+          "reported_display_or_state": "No confirmed tare.",
+          "interpretation_and_verification_need": "Bowl position is partly inferred because hands are not visible.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_27",
+          "time_label": "08:33",
+          "approximate_timestamp_seconds": 513,
+          "reported_action": "After repeated/long button presses, the scale turns off.",
+          "reported_display_or_state": "Display off.",
+          "interpretation_and_verification_need": "Reviewer interprets the operation as power-off rather than successful tare.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_28",
+          "time_label": "08:48",
+          "approximate_timestamp_seconds": 528,
+          "reported_action": "Scale is placed in a drawer.",
+          "reported_display_or_state": "Not applicable.",
+          "interpretation_and_verification_need": "Scale no longer in use.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_29",
+          "time_label": "08:58",
+          "approximate_timestamp_seconds": 538,
+          "reported_action": "Pan and flexible plastic spatula are removed from an induction-style stovetop and stored elsewhere.",
+          "reported_display_or_state": "Not applicable.",
+          "interpretation_and_verification_need": "Induction surface identification inferred from appearance.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_30",
+          "time_label": "09:05–~10:40",
+          "approximate_timestamp_seconds": 545,
+          "reported_action": "Utensils are collected and rearranged, including placement in a dishwasher.",
+          "reported_display_or_state": "Not applicable.",
+          "interpretation_and_verification_need": "Approximate ~95-second cleanup sequence.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_31",
+          "time_label": "10:43",
+          "approximate_timestamp_seconds": 643,
+          "reported_action": "A tablet resembling detergent is added to the dishwasher.",
+          "reported_display_or_state": "Not applicable.",
+          "interpretation_and_verification_need": "Detergent identity inferred from appearance.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_32",
+          "time_label": "10:50",
+          "approximate_timestamp_seconds": 650,
+          "reported_action": "With dishwasher door ajar, person turns the appliance on and then closes it.",
+          "reported_display_or_state": "Not applicable.",
+          "interpretation_and_verification_need": "Appliance operation reported.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_33",
+          "time_label": "10:54",
+          "approximate_timestamp_seconds": 654,
+          "reported_action": "Digital controls of the cooktop are operated; a display increases to what appears to be `0:30:00` over at least 10 seconds.",
+          "reported_display_or_state": "`0:30:00` (apparent timer).",
+          "interpretation_and_verification_need": "**Not a scale reading**; useful negative example for numeric-display classification.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        },
+        {
+          "observation_id": "pre_s4_34",
+          "time_label": "Video end",
+          "approximate_timestamp_seconds": null,
+          "reported_action": "Person picks something up from the floor and washes hands.",
+          "reported_display_or_state": "Not applicable.",
+          "interpretation_and_verification_need": "Final cleanup activity.",
+          "evidence": {
+            "frame_index": null,
+            "image_ref": null,
+            "verification_status": "not_frame_verified"
+          },
+          "provenance": {
+            "source_type": "human",
+            "source_id": "P04_104_manual_observations.md"
+          }
+        }
+      ]
+    }
+  ],
+  "candidate_events": [
+    {
+      "candidate_id": "C01",
+      "reported_interval": "00:15–01:18",
+      "candidate_type": "Initial pancake-mixture addition",
+      "verification_question": "Does `100` represent an ingredient net mass?"
+    },
+    {
+      "candidate_id": "C02",
+      "reported_interval": "01:18–01:28",
+      "candidate_type": "Vessel removal and tare",
+      "verification_question": "What does `-750` mean relative to the prior tare?"
+    },
+    {
+      "candidate_id": "C03",
+      "reported_interval": "01:35–02:04",
+      "candidate_type": "Unidentified dry-ingredient addition",
+      "verification_question": "Is `29` stable and attributable to the added substance?"
+    },
+    {
+      "candidate_id": "C04",
+      "reported_interval": "02:04–03:23",
+      "candidate_type": "Repeated water addition and mixing",
+      "verification_question": "Which readings are stable, which are force artifacts, and is net water mass recoverable?"
+    },
+    {
+      "candidate_id": "C05",
+      "reported_interval": "03:30–04:13",
+      "candidate_type": "Powder addition interrupted by low battery",
+      "verification_question": "Is `448` stable and can a final powder mass be established?"
+    },
+    {
+      "candidate_id": "C06",
+      "reported_interval": "04:13–06:07",
+      "candidate_type": "Scale battery replacement and reset",
+      "verification_question": "Where is measurement continuity lost and re-established?"
+    },
+    {
+      "candidate_id": "C07",
+      "reported_interval": "06:19–06:48",
+      "candidate_type": "Water addition with apparent correction",
+      "verification_question": "Is `315` a stable corrected cumulative reading?"
+    },
+    {
+      "candidate_id": "C08",
+      "reported_interval": "06:51–07:05",
+      "candidate_type": "New unidentified ingredient",
+      "verification_question": "Is the `315 → 323` change attributable to one ingredient?"
+    },
+    {
+      "candidate_id": "C09",
+      "reported_interval": "07:05–08:09",
+      "candidate_type": "Mixing and material removal",
+      "verification_question": "Can transient forces be separated from true mass change?"
+    },
+    {
+      "candidate_id": "C10",
+      "reported_interval": "08:16–08:48",
+      "candidate_type": "Scale shutdown and storage",
+      "verification_question": "Is the control action power-off rather than tare?"
+    },
+    {
+      "candidate_id": "C11",
+      "reported_interval": "08:58–video end",
+      "candidate_type": "Cleanup and appliance operations",
+      "verification_question": "Can non-recipe actions and non-scale numeric displays be excluded?"
+    }
+  ]
+}
