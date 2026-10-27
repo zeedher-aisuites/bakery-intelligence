@@ -1,0 +1,30 @@
+{
+  "timestamp_utc": "2026-10-27T17:42:21.534542+00:00",
+  "provider": "baseten",
+  "model": "meta-models/muse-spark-open-1026",
+  "image": "data\\processed\\experiment_003\\global_1fps\\frame_00018750.jpg",
+  "expected_reading_preliminary": "1756",
+  "response": "1356",
+  "finish_reason": "stop",
+  "reading_matches_preliminary": false,
+  "latency_seconds": 7.197,
+  "usage": {
+    "completion_tokens": 554,
+    "prompt_tokens": 2901,
+    "total_tokens": 3455,
+    "completion_tokens_details": {
+      "accepted_prediction_tokens": 367,
+      "audio_tokens": 0,
+      "reasoning_tokens": 542,
+      "rejected_prediction_tokens": 942,
+      "text_tokens": null
+    },
+    "prompt_tokens_details": {
+      "audio_tokens": 0,
+      "cache_write_tokens": null,
+      "cached_tokens": 128,
+      "image_tokens": null,
+      "text_tokens": null
+    }
+  }
+}

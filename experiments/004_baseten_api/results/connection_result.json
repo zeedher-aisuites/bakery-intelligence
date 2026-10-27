@@ -1,0 +1,27 @@
+{
+  "timestamp_utc": "2026-10-27T17:38:24.026218+00:00",
+  "provider": "baseten",
+  "model": "meta-models/muse-spark-open-1026",
+  "latency_seconds": 1.313,
+  "response": "Bakery Intelligence API connection successful.",
+  "finish_reason": "stop",
+  "usage": {
+    "completion_tokens": 243,
+    "prompt_tokens": 157,
+    "total_tokens": 400,
+    "completion_tokens_details": {
+      "accepted_prediction_tokens": 178,
+      "audio_tokens": 0,
+      "reasoning_tokens": 226,
+      "rejected_prediction_tokens": 277,
+      "text_tokens": null
+    },
+    "prompt_tokens_details": {
+      "audio_tokens": 0,
+      "cache_write_tokens": null,
+      "cached_tokens": 128,
+      "image_tokens": null,
+      "text_tokens": null
+    }
+  }
+}
