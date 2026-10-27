@@ -119,7 +119,7 @@ The first slice is a **deterministic orchestrator** with typed boundaries, not a
 | **Independent Verification** | Pure, deterministic checks at three gates (see §7). Returns `VerificationReport{verdict∈{pass,fail,review_needed}, issues[{code, entity_id, message, gate}], checked_ids[], verifier_version}`. Cannot be bypassed by any generator. | `Gate payload → VerificationReport` | Hard invariants (ID uniqueness, interval validity, referential integrity, derivation→unit/value coherence, no auto-approval) always enforced; retries never weaken them (Domain Rule 10) |
 | **Draft Projection** | Constructs `RecipeDraft{version, steps[], ingredients[], quantities[], evidence_links[], unresolved_questions[], status=pending_review, verification_ref}` **only** from supported events; invents no quantities. | `ActionEvent[] + WeighingEvent[] + VerificationReport(pass/review_needed) → RecipeDraft` | `pending_review` is the only initial status; no draft without evidence links for material claims; unresolved items are explicit questions |
 | **Review & Decision Boundary** | Records `ReviewDecision{draft_id, version, reviewer_id, decision∈{approved, rejected, needs_revision}, notes, decided_at}`. Approval is version-pinned and attributable. | `RecipeDraft + reviewer action → ReviewDecision` + new `RecipeDraft` version if corrected | No automatic approval path (VTR-AC-08); corrections preserve original draft + correction provenance (`spec.md §7`); approved version ≠ auto-approved next version |
-| **Run Diagnostics** | Captures and persists `RunManifest` across the run lifecycle, including partial/failed runs (Constitution VI). | Cross-cutting: every stage appends timing/error/usage | Failures never fabricate success; offline runs have no provider secrets in artifacts; `run_id` is deterministic or UUID with idempotent output naming |
+| **Run Diagnostics** | Captures and persists `RunManifest` across the run lifecycle, including partial/failed runs (Constitution VI). | Cross-cutting: every stage appends timing/error/usage | **Two stages:** M2 seeds minimal `RunManifest` (identity, input snapshot, `started_at`/`budget_state`/`status`); M5 extends to full `§9.1` fields (attempts, provider calls, cost, output hashes, `finished_at`/`elapsed_ms`). Failures never fabricate success; offline runs have no provider secrets in artifacts; `run_id` is deterministic or UUID with idempotent output naming |
 
 ### 3.3 Technology choices and non-goals
 
@@ -200,7 +200,7 @@ Assumption discipline: `frame_index_over_fps` may be used **only** when the anal
 | `raw_reported_value` | `str\|null` | Original free-text (`"-750"`, `"54–55"`) preserved when parser cannot unambiguously produce `scale_value` |
 | `description` | `str\|null` | Concise visual description |
 | `provenance` | `{source_type, source_id}` | `human | model | reviewer | adapter` + source file/run ID |
-| `verification_status` | `str` | `confirmed | ambiguous | unobservable`; adapter-only sources are capped at `ambiguous`/`unobservable` |
+| `verification_status` | `str` | `confirmed | ambiguous | unobservable`; adapter/model/preliminary sources are capped at `ambiguous`/`unobservable` (state 2); only the deterministic verifier may assign `confirmed` for pipeline records (state 3, §5.1/§7); reference `confirmed` (state 4) is a separate human-adjudication process (§5.3) |
 
 #### ActionEvent
 
@@ -241,17 +241,25 @@ Per `docs/schemas/weighing_event_schema.md §Weighing events`: `event_id, start_
 
 ## 5. Evidence Provenance and Append-Only Observation History
 
-### 5.1 Provenance taxonomy
+### 5.1 Provenance and verification-status taxonomy
 
-| `provenance.source_type` | Meaning | `verification_status` ceiling |
-|---|---|---|
-| `human` | Direct human annotation (including preliminary review) | `ambiguous` unless independent adjudication confirms it |
-| `model` | Model inference (future live adapter) | `ambiguous` by default; verifier may not auto-promote |
-| `adapter` | Translation layer (e.g. 0.1.0→1.0.0) | `ambiguous`/`unobservable` only |
-| `reviewer` | Explicit human reviewer/correction | May be `confirmed` per review notes & evidence |
-| `fixture` | Synthetic deterministic fixture | `confirmed` only for synthetic ground truth by construction |
+Four evidence/interpretation states are distinct; each has its own promotion rule (§7 gates). A valid evidence reference never implies verified status.
 
-Preliminary observations carry `provenance: {source_type: "human", source_id: "P04_104_manual_observations.md"}` + `timestamp_basis: approximate_human_video_review` + `evidence: {frame_index: null, image_ref: null, verification_status: not_frame_verified}` (per `P04_104.json`). The adapter preserves all three as first-class provenance; it never synthesizes `frame_index`/`image_ref`.
+| State | Representation | Example | `verification_status` / promotion |
+|---|---|---|---|
+| **(1) Frame-linked evidence** | `FrameEvidence` exists and `Observation.evidence_ids[]` resolves to it; `image_ref` is resolvable under the configured evidence root | `FrameEvidence{evidence_id: frm_00000120, image_ref: runs/<id>/frames/frame_00000120.jpg}` cited by an `Observation` | **Not verified** — existence only proves a frame was extracted, not that a scale reading is correct, stable, or tare-aware. Verifier G1 checks resolvability; G2/G3 check semantic preconditions before any `confirmed` quantity. |
+| **(2) Model-generated interpretation** | `Observation` with `provenance{source_type: model, source_id: "<provider>/<model_id>@<prompt_hash>"}` or `adapter` | Live adapter output `"scale_value: 54"`; preliminary-adapter output from `P04_104.json` | `ambiguous` ceiling. May never be promoted to `confirmed` by the adapter or ledger alone. Requires G2 display-state / tare / unit checks and, where applicable, `measurement_mode` / `derivation` preconditions (§6). |
+| **(3) Independently verified observation** | Same `Observation` after passing deterministic gates G1–G3 **and** satisfying §6 derivation preconditions; `verification_status` upgraded by verifier, not by generator | Synthetic fixture ground truth `Observation{scale_value:120, scale_unit:"g", display_state:stable}` with two compatible `stable` evidences and credible tare history | `confirmed` is a **verifier-assigned** state: G1 (structural + evidence resolvability), G2 (measurement derivation + stable-display support), G3 (draft-level coherence). No generator, adapter, or ledger code may assign `confirmed`. |
+| **(4) Human-adjudicated reference label** | Separate bundle at `experiments/003_video_to_recipe/annotations/reference/`; never read by pipeline stages; used only for evaluation scoring | Independent adjudicator marks `WeighingEvent.net_ingredient_quantity: 120 g, derivation: direct_after_tare` with `verification_status: confirmed` | `confirmed` by **human adjudication process** with provenance `reviewer`; isolated from predictions per §5.3. |
+
+**Promotion rules (normative):**
+
+- Frame existence (`FrameEvidence.image_ref` resolvable) ⇒ no status change.
+- Model/adapter provenance (`source_type: model | adapter | human` preliminary) ⇒ capped at `ambiguous`/`unobservable` until verifier upgrades.
+- Verifier promotion to `confirmed` ⇒ requires all gate checks for that record type plus §6 derivation preconditions; recorded in `VerificationReport.checked_ids[]`.
+- Reference labels ⇒ never read by `Evidence Acquisition`, `Observation Ledger`, `Temporal Reconstruction`, `Draft Projection`, or `Run Diagnostics` (isolation guarantee §5.3); reference corrections require a separately documented revision.
+
+Preliminary observations carry `provenance: {source_type: "human", source_id: "P04_104_manual_observations.md"}` + `timestamp_basis: approximate_human_video_review` + `evidence: {frame_index: null, image_ref: null, verification_status: not_frame_verified}` (per `P04_104.json`). The adapter preserves all three as first-class provenance; it never synthesizes `frame_index`/`image_ref` and never assigns `confirmed`.
 
 ### 5.2 Ledger design
 
@@ -270,7 +278,7 @@ Preliminary observations carry `provenance: {source_type: "human", source_id: "P
 
 ## 6. Tare-Aware Quantity Reasoning
 
-This section enforces `spec.md §5` Domain Rules and Constitution III with **explicit unknown** discipline. The reconstructor never converts a `scale_value` into a `net_ingredient_quantity` by default.
+This section enforces `spec.md §5` Domain Rules and Constitution III with **explicit unknown** discipline. The reconstructor never converts a `scale_value` into a `net_ingredient_quantity` by default. Satisfying these preconditions establishes semantic consistency for a quantity claim; it does not certify pixel-level reading correctness (§5.1, §7).
 
 ### 6.1 Core invariant
 
@@ -309,7 +317,7 @@ Every abstention emits `WeighingEvent{ net_ingredient_quantity{derivation:"unkno
 
 ## 7. Independent Verification Gates
 
-Constitution IV: generators never waive validation. Verification is **pure, deterministic, and outside model-authored content paths** (migration guide §5 Independent enforcement).
+Constitution IV: generators never waive validation. Verification is **pure, deterministic, and outside model-authored content paths** (migration guide §5 Independent enforcement). Deterministic verification establishes structural and semantic consistency (IDs, references, intervals, derivation preconditions, status discipline) — not factual correctness of visual interpretation (whether a scale display was read correctly from pixels). Factual correctness requires independent frame inspection or human adjudication (§5.1 states 3–4).
 
 ### 7.1 Three gates
 
@@ -371,19 +379,21 @@ This satisfies migration guide decision 8 without inventing a service.
 
 ### 9.1 RunManifest (Constitution VI; `spec.md` VTR-FR-10/11; `validation_protocol.md` Reproducibility)
 
-Every run — including `partial`/`failed` — persists at `runs/<run_id>/manifest.json`:
+Every run — including `partial`/`failed` — persists at `runs/<run_id>/manifest.json`. The manifest is staged: M2 seeds a minimal manifest before the offline CLI requires it; M5 extends that seed to the full field set below (see §3.2 Run Diagnostics and §10).
 
-| Field group | Contents |
-|---|---|
-| Identity | `run_id` (UUID or deterministic hash of input+config+revision), `code_revision` (`git rev-parse HEAD` or `unknown-dirty` with warning), `started_at`, `finished_at`, `elapsed_ms` |
-| Input snapshot | Frozen `VideoSource`, `RunConfig`, `timestamp_assumption`, input file hashes (`sha256`) |
-| Outputs | Paths + hashes for `ledger.jsonl`, `events.json`, `draft.json`, `verification.json` |
-| Budgets | `{frame_budget, model_budget, cost_budget_usd, retry_limit}` + `budget_state{consumed, remaining, exhausted_at}` |
-| Provider usage | `provider_calls[{provider, model_id, prompt_hash, settings, started_at, latency_ms, tokens{prompt, completion}, cost_usd, error_code}]` — **no raw media in manifest** if dataset license forbids |
-| Attempts & errors | Ordered `attempts[{stage, verdict, issues_ref}]` + `errors[{stage, code, message}]` |
-| Final status | `status ∈ {completed, partial, failed, awaiting_review}` + `status_reason` (e.g. budget exhausted per VTR-AC-06) |
+| Field group | Contents | Stage |
+|---|---|---|
+| Identity | `run_id` (UUID or deterministic hash of input+config+revision), `code_revision` (`git rev-parse HEAD` or `unknown-dirty` with warning), `started_at` | M2 minimal seed |
+| Identity (finalization) | `finished_at`, `elapsed_ms` | M5 extension |
+| Input snapshot | Frozen `VideoSource`, `RunConfig`, `timestamp_assumption`, input file hashes (`sha256`) | M2 minimal seed |
+| Outputs | Paths for `ledger.jsonl`, `events.json`, `draft.json`, `verification.json` | M2 minimal seed (paths); M5 adds `sha256` hashes |
+| Budgets | `{frame_budget, model_budget, cost_budget_usd, retry_limit}` + `budget_state{consumed, remaining, exhausted_at}` | M2 minimal seed |
+| Provider usage | `provider_calls[{provider, model_id, prompt_hash, settings, started_at, latency_ms, tokens{prompt, completion}, cost_usd, error_code}]` — **no raw media in manifest** if dataset license forbids | M5 extension (empty offline in M2) |
+| Attempts & errors | Ordered `attempts[{stage, verdict, issues_ref}]` + `errors[{stage, code, message}]` | M5 extension |
+| Final status | `status ∈ {completed, partial, failed, awaiting_review}` + `status_reason` (e.g. budget exhausted per VTR-AC-06) | M2 minimal seed |
+| Cost | `cost_summary` | M5 extension (zero offline in M2) |
 
-A stopped/failed run retains a useful partial record with truthful status (Constitution VI acceptance gate).
+A stopped/failed run retains a useful partial record with truthful status (Constitution VI acceptance gate). The offline CLI (M2) depends on the minimal seed writer, not the reverse: the writer exists before the orchestrator lifecycle that calls it (`tasks.md` M2-07 precedes M2-06).
 
 ### 9.2 Bounded execution (VTR-FR-11, VTR-AC-06/07)
 
@@ -414,6 +424,8 @@ evaluations/<run_id>/      # metrics, per validation_protocol
 
 Naming is deterministic / idempotent per bundle; reruns with identical inputs do not overwrite prior `run_id` directories.
 
+Synthetic fixtures fall into three classes with different expected outcomes (`tasks.md` M2-01): (a) **structurally invalid** (`synthetic_interval_dangling_ref.json`) — referentially broken, must yield G1/G2 `fail` with `DANGLING_REFERENCE` and no draft; (b) **valid structure, uncertain semantics** (`synthetic_interval_unknown_tare.json`, `synthetic_interval_conflicting.json`) — pass structural checks but yield `unknown` quantities with `unresolved_questions` or `review_needed` with contradictions preserved; (c) **valid structure, budget-exhausted execution** (`synthetic_interval_partial_budget.json`, or nominal under `--frame-budget 1`) — structurally valid but yields CLI `partial` with `BUDGET_EXHAUSTED` and preserved artifacts. Only the nominal fixture is expected to complete cleanly.
+
 ---
 
 ## 10. Migration Stages M0–M7 — Acceptance Gates
@@ -424,16 +436,16 @@ Stages follow `specs/video-to-recipe/migration-guide.md` §4; exit conditions be
 |---|---|---|---|---|
 | **M0 — Baseline audit** | Dated, evidence-backed capability/gap/contradiction inventory | All inspected docs + code | `specs/video-to-recipe/assessment.md` | Human can see a trustworthy Implemented/Proposed/Gap matrix with file citations and explicit Unknowns; no code changes. ✅ This plan's prerequisite. |
 | **M1 — Reconcile & version core contracts** | One authoritative v1.0.0 contract + preliminary adapter design + contract tests planned | `weighing_event_schema.md` as domain anchor; `P04_104.json` as adapter test case; `pyproject.toml` Pydantic | Versioned Pydantic models, JSON Schemas, adapter spec; tests for invalid refs, timestamps, unknowns, measurement provenance | `pytest tests/test_contracts.py` passes: valid bundles pass, invalid bundles fail with named issues; preliminary→canonical adapter never mutates source, never promotes `not_frame_verified` to `confirmed`. |
-| **M2 — Offline fixture-first end-to-end slice** | Reproducible `[fixture → ledger → events → draft(pending_review) → verification → manifest]` without network/credentials | Fixture design, existing extractor docs (not its execution), M1 contracts | Coordinator, ledger, reconstructor (§6), draft projector, verification gates G1–G3, offline CLI, synthetic fixtures | `bakery-intelligence run --fixture fixtures/synthetic/... --offline` produces ordered events, evidence-linked `RecipeDraft{pending_review}`, persisted `VerificationReport`, `RunManifest` inspectable after run; VTR-AC-01/04/08/10 pass offline. No draft can be `approved` without a `ReviewDecision`. |
-| **M3 — Event memory & conservative mass** | Chronological weighing history with abstention semantics | Synthetic fixtures, ledger | Derivation logic (§6.2), cumulative vs individual mode, zero/negative/single-frame guards | Deterministic fixtures for tare, cumulative, zero-after-tare, negative, conflicting readings all yield correct `unknown`/derivation; evidence refs survive transitions (`spec.md` §10, VTR-AC-02/05). |
-| **M4 — Independent verification & bounded correction** | Generators cannot bypass validation; retries cannot weaken invariants; human escalation is terminal safe path | G1–G3 | Verification as blocking gates, bounded retry envelope, partial-result path | Invalid/unsupported quantities are `fail` or `review_needed` with actionable issues; auto-approval is rejected even under retries; verification version is recorded. |
-| **M5 — Durable & reproducible runs** | Persist normalized outputs, reports, attempt history, provider metadata, failure codes, partial states with stable naming | M1–M4 artifacts, manifest design (§9) | RunManifest writer, checkpoint convention (resume deferred) | Fixture run is fully inspectable post-execution; failed/partial runs preserve provenance and never falsely report `completed`. |
+| **M2 — Offline fixture-first end-to-end slice** | Reproducible minimal `[fixture → ledger → events → draft(pending_review) → verification → manifest]` without network/credentials. Introduces each pipeline capability in minimal form. | Fixture design, existing extractor docs (not its execution), M1 contracts | Minimal coordinator, ledger, reconstructor (core §6.1 + §6.2 happy-path + `unknown` fallback), draft projector, minimal structural G1–G3 gates, offline CLI, synthetic fixtures, minimal RunManifest seed (§9.1) | `bakery-intelligence run --fixture fixtures/synthetic/... --offline` produces ordered events, evidence-linked `RecipeDraft{pending_review}`, persisted `VerificationReport` (structural/semantic consistency), and an inspectable minimal `RunManifest` seed (full §9.1 fields deferred to M5); VTR-AC-01/04/08/10 pass offline. No draft can be `approved` without a `ReviewDecision`. |
+| **M3 — Event memory & conservative mass** | Harden the M2 reconstructor with full chronological weighing history and abstention semantics; extends M2, does not reintroduce the pipeline. | Synthetic fixtures, M2 ledger + minimal reconstructor | Extended derivation matrix (§6.2 full cases), cumulative-vs-individual disambiguation, hardened zero/negative/single-frame/conflicting/force-artifact guards | Beyond the M2 happy-path: deterministic fixtures for tare, cumulative, zero-after-tare, negative, conflicting, and force-artifact readings all yield correct `unknown`/derivation; evidence refs survive transitions (`spec.md` §10, VTR-AC-02/05). |
+| **M4 — Independent verification & bounded correction** | Harden the M2 minimal gates into enforced blocking verification with bounded correction; human escalation is terminal safe path. | M2 minimal G1–G3 | Blocking-gate enforcement audit, bounded retry/retrieval envelope, partial-result path, verifier versioning (extends M2 minimal gates) | Invalid/unsupported quantities are `fail` or `review_needed` with actionable issues; auto-approval is rejected even under retries; verification version is recorded. |
+| **M5 — Durable & reproducible runs** | Extend the M2 minimal manifest seed to durable, fully reproducible runs with stable naming. | M1–M4 artifacts, manifest design (§9) | Full RunManifest writer (§9.1: attempts, provider calls, cost, output hashes, `finished_at`/`elapsed_ms`), checkpoint convention (resume deferred); extends the M2 seed, does not reintroduce it | Fixture run is fully inspectable post-execution; failed/partial runs preserve provenance and never falsely report `completed`. |
 | **M6 — Connect to real visual evidence** | Manifest-backed frames through a cost/time-bounded provider adapter for a supported interval | `extract_frames.py` + `manifest.csv`, M2 pipeline | Provider adapter, PTS or validated FPS path if needed, prompt/model recording | Real-media run has persisted evidence + honest draft/partial outcome; if `P04_104.MP4` or credentials absent, the blocked gate is reported — not simulated. |
 | **M7 — Controlled evaluation & expansion** | Frozen-rubric comparison of configs A/B/(C) on ≥10 independent holdouts; audio introduced only as evaluable claim-aligned signal | `validation_protocol.md` protocol | Holdout registry, scoring harness, cost/runtime accounting | Results have immutable inputs, stated denominators, preserved failures/abstentions, and no preliminary-reference leakage; if not executed, reported as `Not evaluated` (Constitution VII). |
 
 ### Effort guidance
 
-M0–M2 are the **smallest independently verifiable vertical slice** (2–4 small PRs). M3–M5 harden correctness and reproducibility. M6–M7 are integration/evaluation stages that depend on licensed media and optional provider credentials. No time estimate is asserted as a commitment; ordering is by dependency, not a schedule promise.
+M0–M2 are the **smallest independently verifiable vertical slice** (2–4 small PRs). M2 introduces each pipeline capability in minimal form; M3–M5 extend and harden those existing capabilities rather than reintroducing them. M6–M7 are integration/evaluation stages that depend on licensed media and optional provider credentials. No time estimate is asserted as a commitment; ordering is by dependency, not a schedule promise.
 
 ---
 
@@ -462,6 +474,7 @@ Gates, feedback, uncertainty, and escalation are detailed in §7–§8. In brief
 - **Uncertainty:** `null` values, `derivation: unknown`, `measurement_mode: unknown`, `unresolved_questions[]` — never dropped, always surfaced to reviewer.
 - **Human escalation:** `review_needed` verdict is the safe terminal path when evidence is insufficient; a reviewer decision is the only way to reach `approved`.
 - **Approval:** No automatic transition (Constitution V acceptance gate). Every approval is version-pinned and audited.
+- **Semantics:** a `pass` verdict attests structural and semantic consistency only. It does not certify that a scale display, ingredient, or action was interpreted correctly from pixels; frame-linked evidence (state 1) and model-generated interpretation (state 2) remain distinct from verifier-checked consistency (state 3) and human-adjudicated reference labels (state 4) per §5.1.
 
 ---
 
