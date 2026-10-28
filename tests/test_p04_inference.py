@@ -77,7 +77,7 @@ class _FakeResponses:
     def create(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
         action = self.script.pop(0)
-        if isinstance(action, Exception):
+        if isinstance(action, BaseException):
             raise action
         return action
 
@@ -290,11 +290,15 @@ def test_partial_batch_failure_preserves_completed(
 def test_resume_skips_completed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    boom: list = [_response(), _response(), RuntimeError("kill")]
+    # KeyboardInterrupt (BaseException) models a real interruption: it
+    # bypasses MetaClient.submit's `except Exception` provider mapping
+    # exactly like Ctrl-C, while a RuntimeError would be correctly
+    # converted to a PROVIDER_ERROR failure record, not propagated.
+    boom: list = [_response(), _response(), KeyboardInterrupt()]
     calls_one: list = []
     config = _make_config(tmp_path, monkeypatch, count=4, batch_size=2)
     config.client_factory = _factory(boom, [], calls_one)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(KeyboardInterrupt):
         runner.Runner(config).run()
     first_batch = tmp_path / "run" / "observations" / "batch_00000000-00000050.json"
     before = first_batch.read_bytes()

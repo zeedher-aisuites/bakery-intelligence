@@ -134,6 +134,10 @@ its historical projections.
   26-test mocked suite (30 cases) must run on the host first.
 - Run reports reflect the current execution (a no-op resume reports
   zero new tokens); cumulative history lives in `checkpoints.jsonl`.
+- Resume granularity is per batch: a partially failed batch re-runs as
+  a unit (its known-good requests are re-submitted), but observations
+  stay duplicate-free because batch artifacts are keyed by index
+  range; completed batches are never re-submitted.
 - No real inference has occurred; all cost figures remain estimates.
 - Multi-image batching, `input_tokens` probing, and Wonder availability
   are verified-docs-or-unknown until the first live probe.
