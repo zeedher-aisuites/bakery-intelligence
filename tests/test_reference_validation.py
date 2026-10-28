@@ -844,8 +844,11 @@ def test_referential_integrity_weighing_action_ids() -> None:
             },
         )
     ]
+    # Supporting frame evidence resolves the nominal observation edge.
     issues = check_referential_integrity(
-        observations=observations, weighing_events=weighings
+        frame_evidence=[_make_evidence()],
+        observations=observations,
+        weighing_events=weighings,
     )
     assert len(issues) == 1
     assert issues[0].code == "DANGLING_REFERENCE"
@@ -870,7 +873,9 @@ def test_referential_integrity_weighing_observation_ids() -> None:
             },
         )
     ]
+    # Supporting frame evidence resolves the nominal observation edge.
     issues = check_referential_integrity(
+        frame_evidence=[_make_evidence()],
         observations=observations,
         action_events=actions,
         weighing_events=weighings,
@@ -898,7 +903,9 @@ def test_referential_integrity_weighing_final_reading() -> None:
             },
         )
     ]
+    # Supporting frame evidence resolves the nominal observation edge.
     issues = check_referential_integrity(
+        frame_evidence=[_make_evidence()],
         observations=observations,
         action_events=actions,
         weighing_events=weighings,
