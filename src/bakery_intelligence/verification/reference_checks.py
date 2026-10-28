@@ -56,7 +56,9 @@ __all__ = [
 ]
 
 
-def _unknown_derivation_violated(value, unit, derivation) -> bool:
+def _unknown_derivation_violated(
+    value: float | None, unit: str | None, derivation: Derivation
+) -> bool:
     """Return True when an ``unknown`` derivation carries a value or unit.
 
     Defensive branch: :class:`NetIngredientQuantity` rejects

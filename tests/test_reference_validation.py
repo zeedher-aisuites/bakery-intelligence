@@ -1006,6 +1006,21 @@ def test_referential_integrity_edge_order() -> None:
     assert "obs_v" in issues[4].message
 
 
+def test_referential_integrity_repeated_target_single_issue() -> None:
+    """A repeated missing target yields one issue per (referrer, target)."""
+    observations = [
+        _make_observation(
+            observation_id="obs_repeat",
+            evidence_ids=["frm_x", "frm_x"],
+        )
+    ]
+    issues = check_referential_integrity(observations=observations)
+    assert len(issues) == 1
+    assert issues[0].code == "DANGLING_REFERENCE"
+    assert issues[0].entity_id == "obs_repeat"
+    assert "frm_x" in issues[0].message
+
+
 # DERIVATION_WITHOUT_UNIT and UNKNOWN_DERIVATION_WITH_VALUE.
 
 
