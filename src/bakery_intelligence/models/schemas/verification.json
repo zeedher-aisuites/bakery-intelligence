@@ -1,0 +1,111 @@
+{
+  "$defs": {
+    "GateId": {
+      "description": "Verification gate identity (plan.md \u00a77.1).",
+      "enum": [
+        "G1",
+        "G2",
+        "G3"
+      ],
+      "title": "GateId",
+      "type": "string"
+    },
+    "Verdict": {
+      "description": "Verification gate outcome (plan.md \u00a77).",
+      "enum": [
+        "pass",
+        "fail",
+        "review_needed"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    },
+    "VerificationIssue": {
+      "additionalProperties": false,
+      "description": "One machine-readable verification finding.\n\n``severity`` carries a required marker string; its controlled vocabulary\nis defined by the reference checks (M1-03) and verifier gates (M2-03),\nnot by this model.",
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "entity_id": {
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "gate": {
+          "$ref": "#/$defs/GateId"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "severity": {
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "entity_id",
+        "gate",
+        "message",
+        "severity"
+      ],
+      "title": "VerificationIssue",
+      "type": "object"
+    }
+  },
+  "$id": "https://bakery-intelligence.local/schemas/1.0.0/verification.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The persisted outcome of deterministic verification gates.\n\nA ``pass`` verdict attests structural and semantic consistency only; it\ndoes not certify that any display, ingredient, or action was interpreted\ncorrectly from pixels (plan.md \u00a712).",
+  "properties": {
+    "checked_at": {
+      "format": "date-time",
+      "title": "Checked At",
+      "type": "string"
+    },
+    "checked_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Checked Ids",
+      "type": "array"
+    },
+    "issues": {
+      "items": {
+        "$ref": "#/$defs/VerificationIssue"
+      },
+      "title": "Issues",
+      "type": "array"
+    },
+    "report_id": {
+      "minLength": 1,
+      "title": "Report Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "verdict": {
+      "$ref": "#/$defs/Verdict"
+    },
+    "verifier_version": {
+      "minLength": 1,
+      "title": "Verifier Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "report_id",
+    "verdict",
+    "verifier_version",
+    "checked_at"
+  ],
+  "title": "VerificationReport",
+  "type": "object"
+}

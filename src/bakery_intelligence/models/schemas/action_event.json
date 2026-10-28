@@ -1,0 +1,124 @@
+{
+  "$defs": {
+    "ActionType": {
+      "description": "Kitchen action type (weighing_event_schema.md \u00a7Action events).",
+      "enum": [
+        "add",
+        "remove",
+        "tare",
+        "place_container",
+        "remove_container",
+        "mix",
+        "other",
+        "unknown"
+      ],
+      "title": "ActionType",
+      "type": "string"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "description": "Origin of a record: which source type and which source artifact/run.",
+      "properties": {
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_type": {
+          "$ref": "#/$defs/SourceType"
+        }
+      },
+      "required": [
+        "source_type",
+        "source_id"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "SourceType": {
+      "description": "Provenance source of a record (plan.md \u00a74.2).",
+      "enum": [
+        "human",
+        "model",
+        "reviewer",
+        "adapter"
+      ],
+      "title": "SourceType",
+      "type": "string"
+    },
+    "VerificationStatus": {
+      "description": "Observation/event verification state (plan.md \u00a74.2, \u00a75.1).",
+      "enum": [
+        "confirmed",
+        "ambiguous",
+        "unobservable"
+      ],
+      "title": "VerificationStatus",
+      "type": "string"
+    }
+  },
+  "$id": "https://bakery-intelligence.local/schemas/1.0.0/action_event.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An ordered kitchen action interval with supporting observation links.\n\nThe interval satisfies ``0 <= start_seconds < end_seconds`` at this\nlayer; containment within the source duration needs bundle context and\nis enforced by the reference checks (M1-03).",
+  "properties": {
+    "action_id": {
+      "minLength": 1,
+      "title": "Action Id",
+      "type": "string"
+    },
+    "action_type": {
+      "$ref": "#/$defs/ActionType"
+    },
+    "end_seconds": {
+      "title": "End Seconds",
+      "type": "number"
+    },
+    "evidence_observation_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Observation Ids",
+      "type": "array"
+    },
+    "ingredient_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ingredient Id"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "schema_version": {
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "start_seconds": {
+      "minimum": 0,
+      "title": "Start Seconds",
+      "type": "number"
+    },
+    "verification_status": {
+      "$ref": "#/$defs/VerificationStatus"
+    }
+  },
+  "required": [
+    "schema_version",
+    "action_id",
+    "start_seconds",
+    "end_seconds",
+    "action_type",
+    "provenance",
+    "verification_status"
+  ],
+  "title": "ActionEvent",
+  "type": "object"
+}

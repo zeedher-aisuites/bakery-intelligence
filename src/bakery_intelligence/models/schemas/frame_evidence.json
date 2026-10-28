@@ -1,0 +1,181 @@
+{
+  "$defs": {
+    "Extraction": {
+      "additionalProperties": false,
+      "description": "Frame-extraction provenance (manifest-backed in M6).",
+      "properties": {
+        "manifest_sha256": {
+          "pattern": "^[0-9a-fA-F]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "sample_fps": {
+          "exclusiveMinimum": 0,
+          "title": "Sample Fps",
+          "type": "number"
+        },
+        "source_offset": {
+          "minimum": 0,
+          "title": "Source Offset",
+          "type": "number"
+        }
+      },
+      "required": [
+        "sample_fps",
+        "source_offset",
+        "manifest_sha256"
+      ],
+      "title": "Extraction",
+      "type": "object"
+    },
+    "Region": {
+      "additionalProperties": false,
+      "description": "Optional image crop in pixels (``x``, ``y`` origin, size).",
+      "properties": {
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        },
+        "x": {
+          "minimum": 0,
+          "title": "X",
+          "type": "integer"
+        },
+        "y": {
+          "minimum": 0,
+          "title": "Y",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "title": "Region",
+      "type": "object"
+    }
+  },
+  "$id": "https://bakery-intelligence.local/schemas/1.0.0/frame_evidence.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One extracted frame addressable as observation evidence.\n\n``frame_index`` is ``None`` for preliminary-sourced or non-frame\nfixtures. This record asserts that a frame was extracted and where to\nfind it; it asserts nothing about what the frame depicts (plan.md \u00a75.1\nstate 1: frame-linked evidence is not verified interpretation).",
+  "properties": {
+    "evidence_id": {
+      "minLength": 1,
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "extraction": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Extraction"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "frame_index": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Frame Index"
+    },
+    "image_ref": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Image Ref"
+    },
+    "region": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Region"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "requested_timestamp_seconds": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Requested Timestamp Seconds"
+    },
+    "schema_version": {
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_timestamp_seconds": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Timestamp Seconds"
+    },
+    "timestamp_seconds": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Timestamp Seconds"
+    },
+    "video_id": {
+      "minLength": 1,
+      "title": "Video Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "video_id"
+  ],
+  "title": "FrameEvidence",
+  "type": "object"
+}

@@ -1,0 +1,240 @@
+{
+  "$defs": {
+    "Derivation": {
+      "description": "Net-quantity derivation (weighing_event_schema.md \u00a7Weighing events).",
+      "enum": [
+        "direct_after_tare",
+        "difference_between_readings",
+        "independently_verified",
+        "unknown"
+      ],
+      "title": "Derivation",
+      "type": "string"
+    },
+    "DisplayReading": {
+      "additionalProperties": false,
+      "description": "Final displayed reading: what the scale showed, not a net mass.",
+      "properties": {
+        "observation_id": {
+          "minLength": 1,
+          "title": "Observation Id",
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "observation_id"
+      ],
+      "title": "DisplayReading",
+      "type": "object"
+    },
+    "MeasurementMode": {
+      "description": "Weighing measurement mode (weighing_event_schema.md).",
+      "enum": [
+        "individual",
+        "cumulative",
+        "unknown"
+      ],
+      "title": "MeasurementMode",
+      "type": "string"
+    },
+    "NetIngredientQuantity": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "not": {
+              "properties": {
+                "derivation": {
+                  "enum": [
+                    "direct_after_tare",
+                    "difference_between_readings",
+                    "independently_verified"
+                  ]
+                }
+              },
+              "required": [
+                "derivation"
+              ]
+            }
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "type": "null"
+              },
+              "value": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "Derived net ingredient quantity with its derivation.\n\n``derivation == \"unknown\"`` requires ``value`` and ``unit`` to be null\n(plan.md \u00a76.1). Presence of value/unit for non-unknown derivations is\nadditionally checked at the bundle/reference-check layer (M1-03,\n``DERIVATION_WITHOUT_UNIT``).",
+      "properties": {
+        "derivation": {
+          "$ref": "#/$defs/Derivation",
+          "default": "unknown"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "title": "NetIngredientQuantity",
+      "type": "object"
+    },
+    "VerificationStatus": {
+      "description": "Observation/event verification state (plan.md \u00a74.2, \u00a75.1).",
+      "enum": [
+        "confirmed",
+        "ambiguous",
+        "unobservable"
+      ],
+      "title": "VerificationStatus",
+      "type": "string"
+    }
+  },
+  "$id": "https://bakery-intelligence.local/schemas/1.0.0/weighing_event.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A weighing event linking actions, observations, and quantities.\n\n``final_display_reading`` preserves the observed display; only\n``net_ingredient_quantity`` carries a derived mass, and only with a\nsupported (non-unknown) derivation (Constitution III).",
+  "properties": {
+    "action_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Action Ids",
+      "type": "array"
+    },
+    "end_seconds": {
+      "title": "End Seconds",
+      "type": "number"
+    },
+    "event_id": {
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "final_display_reading": {
+      "$ref": "#/$defs/DisplayReading"
+    },
+    "ingredient_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ingredient Id"
+    },
+    "measurement_mode": {
+      "$ref": "#/$defs/MeasurementMode"
+    },
+    "net_ingredient_quantity": {
+      "$ref": "#/$defs/NetIngredientQuantity"
+    },
+    "observation_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Observation Ids",
+      "type": "array"
+    },
+    "review_notes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Review Notes"
+    },
+    "schema_version": {
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "start_seconds": {
+      "minimum": 0,
+      "title": "Start Seconds",
+      "type": "number"
+    },
+    "tare_observed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tare Observed"
+    },
+    "verification_status": {
+      "$ref": "#/$defs/VerificationStatus"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "start_seconds",
+    "end_seconds",
+    "final_display_reading",
+    "net_ingredient_quantity",
+    "measurement_mode",
+    "verification_status"
+  ],
+  "title": "WeighingEvent",
+  "type": "object"
+}

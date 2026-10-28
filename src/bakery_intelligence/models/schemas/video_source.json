@@ -1,0 +1,138 @@
+{
+  "$defs": {
+    "TimeInterval": {
+      "additionalProperties": false,
+      "description": "Half-open-style bounded interval with ``0 <= start < end``.\n\nThe ``end <= duration`` bound needs bundle context (video duration) and\nis enforced at the bundle/reference-check layer (M1-03), except on\n:class:`VideoSource`, which carries its own duration.",
+      "properties": {
+        "end_seconds": {
+          "title": "End Seconds",
+          "type": "number"
+        },
+        "start_seconds": {
+          "minimum": 0,
+          "title": "Start Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start_seconds",
+        "end_seconds"
+      ],
+      "title": "TimeInterval",
+      "type": "object"
+    },
+    "TimestampBasis": {
+      "description": "Provenance taxonomy for every timestamp (plan.md \u00a74.2).",
+      "enum": [
+        "frame_index_over_fps",
+        "presentation_timestamp",
+        "approximate_human_video_review",
+        "synthetic_fixture"
+      ],
+      "title": "TimestampBasis",
+      "type": "string"
+    }
+  },
+  "$id": "https://bakery-intelligence.local/schemas/1.0.0/video_source.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Identity, bounds, and timing basis of the interval under analysis.\n\n``fps``, ``frame_count``, and ``duration_seconds`` are ``None`` when the\ncorresponding source property is unknown. The interval always satisfies\n``0 <= start < end`` (via :class:`TimeInterval`); ``end <= duration`` is\nadditionally enforced here because this record carries its own duration.",
+  "properties": {
+    "duration_seconds": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Duration Seconds"
+    },
+    "fps": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fps"
+    },
+    "frame_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Frame Count"
+    },
+    "interval": {
+      "$ref": "#/$defs/TimeInterval"
+    },
+    "license": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "License"
+    },
+    "schema_version": {
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_dataset": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Dataset"
+    },
+    "source_ref": {
+      "minLength": 1,
+      "not": {
+        "pattern": "^([/\\\\]|[A-Za-z]:[/\\\\])"
+      },
+      "title": "Source Ref",
+      "type": "string"
+    },
+    "timestamp_basis": {
+      "$ref": "#/$defs/TimestampBasis"
+    },
+    "video_id": {
+      "minLength": 1,
+      "title": "Video Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "video_id",
+    "source_ref",
+    "timestamp_basis",
+    "interval"
+  ],
+  "title": "VideoSource",
+  "type": "object"
+}

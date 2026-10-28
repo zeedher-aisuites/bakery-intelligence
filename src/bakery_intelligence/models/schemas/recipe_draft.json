@@ -1,0 +1,300 @@
+{
+  "$defs": {
+    "Derivation": {
+      "description": "Net-quantity derivation (weighing_event_schema.md \u00a7Weighing events).",
+      "enum": [
+        "direct_after_tare",
+        "difference_between_readings",
+        "independently_verified",
+        "unknown"
+      ],
+      "title": "Derivation",
+      "type": "string"
+    },
+    "DraftIngredient": {
+      "additionalProperties": false,
+      "description": "An ingredient entry with quantity and support state.",
+      "properties": {
+        "ingredient_id": {
+          "minLength": 1,
+          "title": "Ingredient Id",
+          "type": "string"
+        },
+        "quantity": {
+          "$ref": "#/$defs/DraftQuantity"
+        },
+        "status": {
+          "$ref": "#/$defs/IngredientQuantityStatus"
+        }
+      },
+      "required": [
+        "ingredient_id",
+        "quantity",
+        "status"
+      ],
+      "title": "DraftIngredient",
+      "type": "object"
+    },
+    "DraftQuantity": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "not": {
+              "properties": {
+                "derivation": {
+                  "enum": [
+                    "direct_after_tare",
+                    "difference_between_readings",
+                    "independently_verified"
+                  ]
+                }
+              },
+              "required": [
+                "derivation"
+              ]
+            }
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "type": "null"
+              },
+              "value": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "A draft ingredient quantity. Quantities exist only with a supported\n(non-unknown) derivation; otherwise value and unit stay null.",
+      "properties": {
+        "derivation": {
+          "$ref": "#/$defs/Derivation",
+          "default": "unknown"
+        },
+        "source_event_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Event Id"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "title": "DraftQuantity",
+      "type": "object"
+    },
+    "DraftStatus": {
+      "description": "Recipe draft lifecycle state. ``approved`` is set only through an\nexplicit human ``ReviewDecision`` enforced by the review boundary and\nverification gate G3 (Constitution V, plan.md \u00a78), never by a generator.",
+      "enum": [
+        "pending_review",
+        "approved"
+      ],
+      "title": "DraftStatus",
+      "type": "string"
+    },
+    "DraftStep": {
+      "additionalProperties": false,
+      "description": "One ordered procedure step with claim-to-evidence links.",
+      "properties": {
+        "action_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Action Ids",
+          "type": "array"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "evidence_summary": {
+          "title": "Evidence Summary",
+          "type": "string"
+        },
+        "index": {
+          "minimum": 0,
+          "title": "Index",
+          "type": "integer"
+        },
+        "observation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Observation Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "index",
+        "description",
+        "evidence_summary"
+      ],
+      "title": "DraftStep",
+      "type": "object"
+    },
+    "EvidenceRefs": {
+      "additionalProperties": false,
+      "description": "Navigable claim-to-evidence indices for the draft.",
+      "properties": {
+        "frame_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Frame Evidence Ids",
+          "type": "array"
+        },
+        "observation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Observation Ids",
+          "type": "array"
+        }
+      },
+      "title": "EvidenceRefs",
+      "type": "object"
+    },
+    "IngredientQuantityStatus": {
+      "description": "Support state of a draft ingredient quantity (plan.md \u00a74.2).",
+      "enum": [
+        "supported",
+        "unknown",
+        "conflicting"
+      ],
+      "title": "IngredientQuantityStatus",
+      "type": "string"
+    },
+    "UnresolvedQuestion": {
+      "additionalProperties": false,
+      "description": "An explicit gap surfaced to the reviewer.",
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "related_entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Entity Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "UnresolvedQuestion",
+      "type": "object"
+    }
+  },
+  "$id": "https://bakery-intelligence.local/schemas/1.0.0/recipe_draft.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An evidence-linked recipe/procedure draft awaiting human review.\n\nNew drafts are ``pending_review`` (the default). ``approved`` is\nrepresentable for historical versions but must only result from an\nexplicit human ``ReviewDecision`` through the review boundary and gate\nG3 (Constitution V); no generator path may set it.",
+  "properties": {
+    "draft_id": {
+      "minLength": 1,
+      "title": "Draft Id",
+      "type": "string"
+    },
+    "evidence_refs": {
+      "$ref": "#/$defs/EvidenceRefs"
+    },
+    "ingredients": {
+      "items": {
+        "$ref": "#/$defs/DraftIngredient"
+      },
+      "title": "Ingredients",
+      "type": "array"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/DraftStatus",
+      "default": "pending_review"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/DraftStep"
+      },
+      "title": "Steps",
+      "type": "array"
+    },
+    "unresolved_questions": {
+      "items": {
+        "$ref": "#/$defs/UnresolvedQuestion"
+      },
+      "title": "Unresolved Questions",
+      "type": "array"
+    },
+    "verification_ref": {
+      "minLength": 1,
+      "title": "Verification Ref",
+      "type": "string"
+    },
+    "version": {
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "video_id": {
+      "minLength": 1,
+      "title": "Video Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "draft_id",
+    "version",
+    "video_id",
+    "verification_ref",
+    "run_id"
+  ],
+  "title": "RecipeDraft",
+  "type": "object"
+}

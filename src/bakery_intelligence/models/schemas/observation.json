@@ -1,0 +1,279 @@
+{
+  "$defs": {
+    "DisplayState": {
+      "description": "Scale display state (weighing_event_schema.md \u00a7Frame observations).",
+      "enum": [
+        "changing",
+        "stable",
+        "zero",
+        "occluded",
+        "unknown"
+      ],
+      "title": "DisplayState",
+      "type": "string"
+    },
+    "Modality": {
+      "description": "Observation modality. Audio is deferred to P2 (plan.md \u00a74.2).",
+      "enum": [
+        "visual"
+      ],
+      "title": "Modality",
+      "type": "string"
+    },
+    "ObservationType": {
+      "description": "Observation subject (weighing_event_schema.md \u00a7Frame observations).",
+      "enum": [
+        "scale_display",
+        "ingredient",
+        "action",
+        "container",
+        "other"
+      ],
+      "title": "ObservationType",
+      "type": "string"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "description": "Origin of a record: which source type and which source artifact/run.",
+      "properties": {
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_type": {
+          "$ref": "#/$defs/SourceType"
+        }
+      },
+      "required": [
+        "source_type",
+        "source_id"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "SourceType": {
+      "description": "Provenance source of a record (plan.md \u00a74.2).",
+      "enum": [
+        "human",
+        "model",
+        "reviewer",
+        "adapter"
+      ],
+      "title": "SourceType",
+      "type": "string"
+    },
+    "TimeInterval": {
+      "additionalProperties": false,
+      "description": "Half-open-style bounded interval with ``0 <= start < end``.\n\nThe ``end <= duration`` bound needs bundle context (video duration) and\nis enforced at the bundle/reference-check layer (M1-03), except on\n:class:`VideoSource`, which carries its own duration.",
+      "properties": {
+        "end_seconds": {
+          "title": "End Seconds",
+          "type": "number"
+        },
+        "start_seconds": {
+          "minimum": 0,
+          "title": "Start Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start_seconds",
+        "end_seconds"
+      ],
+      "title": "TimeInterval",
+      "type": "object"
+    },
+    "TimestampBasis": {
+      "description": "Provenance taxonomy for every timestamp (plan.md \u00a74.2).",
+      "enum": [
+        "frame_index_over_fps",
+        "presentation_timestamp",
+        "approximate_human_video_review",
+        "synthetic_fixture"
+      ],
+      "title": "TimestampBasis",
+      "type": "string"
+    },
+    "VerificationStatus": {
+      "description": "Observation/event verification state (plan.md \u00a74.2, \u00a75.1).",
+      "enum": [
+        "confirmed",
+        "ambiguous",
+        "unobservable"
+      ],
+      "title": "VerificationStatus",
+      "type": "string"
+    }
+  },
+  "$id": "https://bakery-intelligence.local/schemas/1.0.0/observation.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "timestamp_seconds": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "timestamp_seconds"
+          ]
+        },
+        {
+          "properties": {
+            "interval": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "interval"
+          ]
+        }
+      ]
+    }
+  ],
+  "description": "A single claim about visible evidence, with provenance and status.\n\n``scale_value`` is the displayed value when legible; it is never a net\ningredient mass (Constitution III). ``scale_unit_hypothesis`` is an\nannotation that must never be promoted to ``scale_unit``.\n\nExactly one of ``timestamp_seconds`` or ``interval`` must be set, so a\nsingle timestamp and a time range are never confused. Timestamps are\nnonnegative at this layer; containment within the source interval needs\nbundle context and is enforced by the reference checks (M1-03).\n\nThis model is representational: it neither promotes nor demotes\n``verification_status``. Status ceilings for adapter/model/preliminary\nsources are enforced by the adapter (M1-02); promotion to ``confirmed``\nis reserved to the deterministic verifier (M2-03) and to the isolated\nhuman-adjudication process (plan.md \u00a75.1).",
+  "properties": {
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "display_state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DisplayState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "evidence_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "interval": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TimeInterval"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "modality": {
+      "$ref": "#/$defs/Modality",
+      "default": "visual"
+    },
+    "observation_id": {
+      "minLength": 1,
+      "title": "Observation Id",
+      "type": "string"
+    },
+    "observation_type": {
+      "$ref": "#/$defs/ObservationType"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "raw_reported_value": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Raw Reported Value"
+    },
+    "scale_unit": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scale Unit"
+    },
+    "scale_unit_hypothesis": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scale Unit Hypothesis"
+    },
+    "scale_value": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scale Value"
+    },
+    "schema_version": {
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "timestamp_basis": {
+      "$ref": "#/$defs/TimestampBasis"
+    },
+    "timestamp_seconds": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Timestamp Seconds"
+    },
+    "verification_status": {
+      "$ref": "#/$defs/VerificationStatus"
+    }
+  },
+  "required": [
+    "schema_version",
+    "observation_id",
+    "timestamp_basis",
+    "observation_type",
+    "provenance",
+    "verification_status"
+  ],
+  "title": "Observation",
+  "type": "object"
+}

@@ -1,0 +1,691 @@
+{
+  "$defs": {
+    "AttemptRecord": {
+      "additionalProperties": false,
+      "description": "One recorded stage attempt with its verdict.",
+      "properties": {
+        "issues_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issues Ref"
+        },
+        "stage": {
+          "minLength": 1,
+          "title": "Stage",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "stage",
+        "verdict"
+      ],
+      "title": "AttemptRecord",
+      "type": "object"
+    },
+    "BudgetState": {
+      "additionalProperties": false,
+      "description": "Consumed-budget counters and exhaustion marker (plan.md \u00a79.1).",
+      "properties": {
+        "cost_usd_spent": {
+          "minimum": 0,
+          "title": "Cost Usd Spent",
+          "type": "number"
+        },
+        "exhausted": {
+          "title": "Exhausted",
+          "type": "boolean"
+        },
+        "exhausted_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exhausted At"
+        },
+        "frames_used": {
+          "minimum": 0,
+          "title": "Frames Used",
+          "type": "integer"
+        },
+        "model_calls_used": {
+          "minimum": 0,
+          "title": "Model Calls Used",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "frames_used",
+        "model_calls_used",
+        "cost_usd_spent",
+        "exhausted"
+      ],
+      "title": "BudgetState",
+      "type": "object"
+    },
+    "CostSummary": {
+      "additionalProperties": false,
+      "description": "Aggregated variable cost. Offline runs stay at zero.",
+      "properties": {
+        "currency": {
+          "default": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "total_cost_usd": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Total Cost Usd",
+          "type": "number"
+        }
+      },
+      "title": "CostSummary",
+      "type": "object"
+    },
+    "ProviderCallRecord": {
+      "additionalProperties": false,
+      "description": "Metadata for one provider call (never raw media under license).",
+      "properties": {
+        "cost_usd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Usd"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "latency_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latency Ms"
+        },
+        "model_id": {
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "prompt_hash": {
+          "minLength": 1,
+          "title": "Prompt Hash",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "settings": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Settings"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "provider",
+        "model_id",
+        "prompt_hash"
+      ],
+      "title": "ProviderCallRecord",
+      "type": "object"
+    },
+    "RunConfig": {
+      "additionalProperties": false,
+      "description": "Frozen analysis configuration snapshot for the run.",
+      "properties": {
+        "cost_budget_usd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Budget Usd"
+        },
+        "frame_budget": {
+          "minimum": 0,
+          "title": "Frame Budget",
+          "type": "integer"
+        },
+        "interval": {
+          "$ref": "#/$defs/TimeInterval"
+        },
+        "model_budget": {
+          "minimum": 0,
+          "title": "Model Budget",
+          "type": "integer"
+        },
+        "retry_limit": {
+          "minimum": 0,
+          "title": "Retry Limit",
+          "type": "integer"
+        },
+        "sample_fps": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Fps"
+        }
+      },
+      "required": [
+        "interval",
+        "frame_budget",
+        "model_budget",
+        "retry_limit"
+      ],
+      "title": "RunConfig",
+      "type": "object"
+    },
+    "RunError": {
+      "additionalProperties": false,
+      "description": "One structured run error.",
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "stage": {
+          "minLength": 1,
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "code",
+        "message"
+      ],
+      "title": "RunError",
+      "type": "object"
+    },
+    "RunOutputs": {
+      "additionalProperties": false,
+      "description": "Artifact paths produced by the run, with hashes when computed.\n\nAll fields are optional because partial and failed runs persist a\nmanifest before every artifact exists. Output hashes are added by the\nfull manifest writer (M5); the M2 minimal seed records paths only.",
+      "properties": {
+        "draft_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Draft Path"
+        },
+        "draft_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-fA-F]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Draft Sha256"
+        },
+        "events_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Events Path"
+        },
+        "events_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-fA-F]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Events Sha256"
+        },
+        "ledger_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ledger Path"
+        },
+        "ledger_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-fA-F]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ledger Sha256"
+        },
+        "verification_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verification Path"
+        },
+        "verification_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-fA-F]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verification Sha256"
+        }
+      },
+      "title": "RunOutputs",
+      "type": "object"
+    },
+    "RunStatus": {
+      "description": "Terminal-or-current run state (plan.md \u00a79.1).",
+      "enum": [
+        "completed",
+        "partial",
+        "failed",
+        "awaiting_review"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    },
+    "TimeInterval": {
+      "additionalProperties": false,
+      "description": "Half-open-style bounded interval with ``0 <= start < end``.\n\nThe ``end <= duration`` bound needs bundle context (video duration) and\nis enforced at the bundle/reference-check layer (M1-03), except on\n:class:`VideoSource`, which carries its own duration.",
+      "properties": {
+        "end_seconds": {
+          "title": "End Seconds",
+          "type": "number"
+        },
+        "start_seconds": {
+          "minimum": 0,
+          "title": "Start Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start_seconds",
+        "end_seconds"
+      ],
+      "title": "TimeInterval",
+      "type": "object"
+    },
+    "TimestampBasis": {
+      "description": "Provenance taxonomy for every timestamp (plan.md \u00a74.2).",
+      "enum": [
+        "frame_index_over_fps",
+        "presentation_timestamp",
+        "approximate_human_video_review",
+        "synthetic_fixture"
+      ],
+      "title": "TimestampBasis",
+      "type": "string"
+    },
+    "TokenUsage": {
+      "additionalProperties": false,
+      "description": "Provider token accounting for one call.",
+      "properties": {
+        "completion": {
+          "minimum": 0,
+          "title": "Completion",
+          "type": "integer"
+        },
+        "prompt": {
+          "minimum": 0,
+          "title": "Prompt",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "prompt",
+        "completion"
+      ],
+      "title": "TokenUsage",
+      "type": "object"
+    },
+    "Verdict": {
+      "description": "Verification gate outcome (plan.md \u00a77).",
+      "enum": [
+        "pass",
+        "fail",
+        "review_needed"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    },
+    "VideoSource": {
+      "additionalProperties": false,
+      "description": "Identity, bounds, and timing basis of the interval under analysis.\n\n``fps``, ``frame_count``, and ``duration_seconds`` are ``None`` when the\ncorresponding source property is unknown. The interval always satisfies\n``0 <= start < end`` (via :class:`TimeInterval`); ``end <= duration`` is\nadditionally enforced here because this record carries its own duration.",
+      "properties": {
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        },
+        "fps": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fps"
+        },
+        "frame_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Frame Count"
+        },
+        "interval": {
+          "$ref": "#/$defs/TimeInterval"
+        },
+        "license": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "License"
+        },
+        "schema_version": {
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_dataset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Dataset"
+        },
+        "source_ref": {
+          "minLength": 1,
+          "title": "Source Ref",
+          "type": "string"
+        },
+        "timestamp_basis": {
+          "$ref": "#/$defs/TimestampBasis"
+        },
+        "video_id": {
+          "minLength": 1,
+          "title": "Video Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "video_id",
+        "source_ref",
+        "timestamp_basis",
+        "interval"
+      ],
+      "title": "VideoSource",
+      "type": "object"
+    }
+  },
+  "$id": "https://bakery-intelligence.local/schemas/1.0.0/run_manifest.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Reproducible audit trail of one run, including partial/failed runs.\n\n``status`` always reflects the truthful outcome; failures never\nfabricate success (Constitution VI). The offline minimal seed (M2)\npopulates identity, input snapshots, ``started_at``, ``budget_state``,\noutput paths, and ``status``; the full writer (M5) adds finalization,\nhashes, attempts, provider calls, errors, and cost.",
+  "properties": {
+    "attempts": {
+      "items": {
+        "$ref": "#/$defs/AttemptRecord"
+      },
+      "title": "Attempts",
+      "type": "array"
+    },
+    "budget_state": {
+      "$ref": "#/$defs/BudgetState"
+    },
+    "code_revision": {
+      "minLength": 1,
+      "title": "Code Revision",
+      "type": "string"
+    },
+    "cost_summary": {
+      "$ref": "#/$defs/CostSummary"
+    },
+    "elapsed_ms": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Elapsed Ms"
+    },
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/RunError"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "finished_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finished At"
+    },
+    "outputs": {
+      "$ref": "#/$defs/RunOutputs"
+    },
+    "provider_calls": {
+      "items": {
+        "$ref": "#/$defs/ProviderCallRecord"
+      },
+      "title": "Provider Calls",
+      "type": "array"
+    },
+    "run_config_snapshot": {
+      "$ref": "#/$defs/RunConfig"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/RunStatus"
+    },
+    "status_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Status Reason"
+    },
+    "timestamp_assumption": {
+      "minLength": 1,
+      "title": "Timestamp Assumption",
+      "type": "string"
+    },
+    "video_source_snapshot": {
+      "$ref": "#/$defs/VideoSource"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "code_revision",
+    "started_at",
+    "video_source_snapshot",
+    "run_config_snapshot",
+    "timestamp_assumption",
+    "budget_state",
+    "status"
+  ],
+  "title": "RunManifest",
+  "type": "object"
+}
