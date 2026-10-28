@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0.0",
+  "fixture_id": "synthetic_interval_nominal",
+  "description": "[class: nominal] [expected-m1-03: pass] [expected-m2: completed-pass] Happy-path synthetic bundle: a zeroed scale reading at t=2.0 s followed by a stable 120.0 g mass reading at t=4.8 s, each linked to interior frames of the 0-10 s interval. No real media; all timestamps use the synthetic_fixture basis.",
+  "video_source": {
+    "schema_version": "1.0.0",
+    "video_id": "SYNTH.NOM.001",
+    "source_ref": "synthetic/synthetic_interval_nominal.mp4",
+    "source_dataset": "synthetic-fixture",
+    "timestamp_basis": "synthetic_fixture",
+    "fps": 25.0,
+    "frame_count": 250,
+    "duration_seconds": 10.0,
+    "interval": {
+      "start_seconds": 0.0,
+      "end_seconds": 10.0
+    }
+  },
+  "frame_evidence": [
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "frm_nom_001",
+      "video_id": "SYNTH.NOM.001",
+      "frame_index": 50,
+      "timestamp_seconds": 2.0,
+      "image_ref": null
+    },
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "frm_nom_002",
+      "video_id": "SYNTH.NOM.001",
+      "frame_index": 120,
+      "timestamp_seconds": 4.8,
+      "image_ref": null
+    },
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "frm_nom_003",
+      "video_id": "SYNTH.NOM.001",
+      "frame_index": 125,
+      "timestamp_seconds": 5.0,
+      "image_ref": null
+    }
+  ],
+  "observations": [
+    {
+      "schema_version": "1.0.0",
+      "observation_id": "obs_nom_tare",
+      "modality": "visual",
+      "timestamp_seconds": 2.0,
+      "timestamp_basis": "synthetic_fixture",
+      "observation_type": "scale_display",
+      "scale_value": 0.0,
+      "scale_unit": "g",
+      "scale_unit_hypothesis": null,
+      "display_state": "zero",
+      "evidence_ids": [
+        "frm_nom_001"
+      ],
+      "raw_reported_value": null,
+      "description": "Zeroed scale display showing 0.0 g.",
+      "provenance": {
+        "source_type": "human",
+        "source_id": "synthetic_interval_nominal.json"
+      },
+      "verification_status": "ambiguous"
+    },
+    {
+      "schema_version": "1.0.0",
+      "observation_id": "obs_nom_mass",
+      "modality": "visual",
+      "timestamp_seconds": 4.8,
+      "timestamp_basis": "synthetic_fixture",
+      "observation_type": "scale_display",
+      "scale_value": 120.0,
+      "scale_unit": "g",
+      "scale_unit_hypothesis": null,
+      "display_state": "stable",
+      "evidence_ids": [
+        "frm_nom_002",
+        "frm_nom_003"
+      ],
+      "raw_reported_value": null,
+      "description": "Stable scale display showing 120.0 g.",
+      "provenance": {
+        "source_type": "human",
+        "source_id": "synthetic_interval_nominal.json"
+      },
+      "verification_status": "ambiguous"
+    }
+  ]
+}

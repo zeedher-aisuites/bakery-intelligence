@@ -1,0 +1,113 @@
+{
+  "schema_version": "1.0.0",
+  "fixture_id": "synthetic_interval_partial_budget",
+  "description": "[class: c] [expected-m1-03: pass] [expected-m2: partial-BUDGET_EXHAUSTED] Structurally valid three-frame bundle (t=1.0, 4.8, 7.0 s) with a zeroed reading plus two stable 120.0 g mass readings. Designed for budget-exhaustion runs: under a frame budget it yields a partial run, otherwise it completes. No real media; synthetic_fixture basis.",
+  "video_source": {
+    "schema_version": "1.0.0",
+    "video_id": "SYNTH.BUD.001",
+    "source_ref": "synthetic/synthetic_interval_partial_budget.mp4",
+    "source_dataset": "synthetic-fixture",
+    "timestamp_basis": "synthetic_fixture",
+    "fps": 25.0,
+    "frame_count": 250,
+    "duration_seconds": 10.0,
+    "interval": {
+      "start_seconds": 0.0,
+      "end_seconds": 10.0
+    }
+  },
+  "frame_evidence": [
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "frm_bud_001",
+      "video_id": "SYNTH.BUD.001",
+      "frame_index": 25,
+      "timestamp_seconds": 1.0,
+      "image_ref": null
+    },
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "frm_bud_002",
+      "video_id": "SYNTH.BUD.001",
+      "frame_index": 120,
+      "timestamp_seconds": 4.8,
+      "image_ref": null
+    },
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "frm_bud_003",
+      "video_id": "SYNTH.BUD.001",
+      "frame_index": 175,
+      "timestamp_seconds": 7.0,
+      "image_ref": null
+    }
+  ],
+  "observations": [
+    {
+      "schema_version": "1.0.0",
+      "observation_id": "obs_bud_001",
+      "modality": "visual",
+      "timestamp_seconds": 1.0,
+      "timestamp_basis": "synthetic_fixture",
+      "observation_type": "scale_display",
+      "scale_value": 0.0,
+      "scale_unit": "g",
+      "scale_unit_hypothesis": null,
+      "display_state": "zero",
+      "evidence_ids": [
+        "frm_bud_001"
+      ],
+      "raw_reported_value": null,
+      "description": "Zeroed scale display showing 0.0 g.",
+      "provenance": {
+        "source_type": "human",
+        "source_id": "synthetic_interval_partial_budget.json"
+      },
+      "verification_status": "ambiguous"
+    },
+    {
+      "schema_version": "1.0.0",
+      "observation_id": "obs_bud_002",
+      "modality": "visual",
+      "timestamp_seconds": 4.8,
+      "timestamp_basis": "synthetic_fixture",
+      "observation_type": "scale_display",
+      "scale_value": 120.0,
+      "scale_unit": "g",
+      "scale_unit_hypothesis": null,
+      "display_state": "stable",
+      "evidence_ids": [
+        "frm_bud_002"
+      ],
+      "raw_reported_value": null,
+      "description": "Stable scale display showing 120.0 g.",
+      "provenance": {
+        "source_type": "human",
+        "source_id": "synthetic_interval_partial_budget.json"
+      },
+      "verification_status": "ambiguous"
+    },
+    {
+      "schema_version": "1.0.0",
+      "observation_id": "obs_bud_003",
+      "modality": "visual",
+      "timestamp_seconds": 7.0,
+      "timestamp_basis": "synthetic_fixture",
+      "observation_type": "scale_display",
+      "scale_value": 120.0,
+      "scale_unit": "g",
+      "scale_unit_hypothesis": null,
+      "display_state": "stable",
+      "evidence_ids": [
+        "frm_bud_003"
+      ],
+      "raw_reported_value": null,
+      "description": "Stable scale display showing 120.0 g.",
+      "provenance": {
+        "source_type": "human",
+        "source_id": "synthetic_interval_partial_budget.json"
+      },
+      "verification_status": "ambiguous"
+    }
+  ]
+}

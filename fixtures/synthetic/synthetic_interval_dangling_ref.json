@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0.0",
+  "fixture_id": "synthetic_interval_dangling_ref",
+  "description": "[class: a] [expected-m1-03: fail] [expected-m2: fail-DANGLING_REFERENCE-no-draft] Structurally invalid bundle: obs_dan_001 cites frm_missing_001, which is absent from frame_evidence. The loader parses this file; only the structural reference check reports the dangling edge. No real media; synthetic_fixture basis.",
+  "video_source": {
+    "schema_version": "1.0.0",
+    "video_id": "SYNTH.DAN.001",
+    "source_ref": "synthetic/synthetic_interval_dangling_ref.mp4",
+    "source_dataset": "synthetic-fixture",
+    "timestamp_basis": "synthetic_fixture",
+    "fps": 25.0,
+    "frame_count": 250,
+    "duration_seconds": 10.0,
+    "interval": {
+      "start_seconds": 0.0,
+      "end_seconds": 10.0
+    }
+  },
+  "frame_evidence": [
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "frm_dan_001",
+      "video_id": "SYNTH.DAN.001",
+      "frame_index": 120,
+      "timestamp_seconds": 4.8,
+      "image_ref": null
+    }
+  ],
+  "observations": [
+    {
+      "schema_version": "1.0.0",
+      "observation_id": "obs_dan_001",
+      "modality": "visual",
+      "timestamp_seconds": 4.8,
+      "timestamp_basis": "synthetic_fixture",
+      "observation_type": "scale_display",
+      "scale_value": 120.0,
+      "scale_unit": "g",
+      "scale_unit_hypothesis": null,
+      "display_state": "stable",
+      "evidence_ids": [
+        "frm_missing_001"
+      ],
+      "raw_reported_value": null,
+      "description": "Stable scale display showing 120.0 g.",
+      "provenance": {
+        "source_type": "human",
+        "source_id": "synthetic_interval_dangling_ref.json"
+      },
+      "verification_status": "ambiguous"
+    }
+  ]
+}
