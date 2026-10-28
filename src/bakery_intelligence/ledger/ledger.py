@@ -433,7 +433,8 @@ def write_snapshot(
     """Write a snapshot as deterministic JSON for ``observations.json``.
 
     Creates parent directories. Output uses sorted keys, 2-space
-    indent, and a trailing line feed.
+    indent, and a trailing line feed. Line endings are LF on every
+    platform (no CRLF translation).
     """
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     text = (
@@ -442,4 +443,4 @@ def write_snapshot(
         )
         + "\n"
     )
-    snapshot_path.write_text(text, encoding="utf-8")
+    snapshot_path.write_text(text, encoding="utf-8", newline="\n")

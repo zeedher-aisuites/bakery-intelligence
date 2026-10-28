@@ -16,6 +16,7 @@ nothing is imported from ``test_fixtures``.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
@@ -957,16 +958,32 @@ def test_ledger_package_has_no_mutation_helpers() -> None:
 
 
 def test_ledger_package_imports_only_allowlisted_modules() -> None:
+    """Parsed imports stay within stdlib, pydantic, bakery_intelligence.
+
+    Uses :mod:`ast` so docstrings, comments, and string literals are
+    never mistaken for import statements.
+    """
     stdlib = set(sys.stdlib_module_names)
     allowed = {"pydantic", "bakery_intelligence"}
-    pattern = re.compile(r"^(?:import|from)\s+([A-Za-z_][A-Za-z0-9_.]*)")
     for filename in ("__init__.py", "ledger.py"):
         text = (LEDGER_DIR / filename).read_text(encoding="utf-8")
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped.startswith(("import ", "from ")):
-                top = pattern.match(stripped).group(1).split(".")[0]  # type: ignore[union-attr]
-                assert top in stdlib or top in allowed, stripped
+        tree = ast.parse(text, filename=filename)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".")[0]
+                    assert top in stdlib or top in allowed, (
+                        f"{filename}: import {alias.name}"
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                if node.level > 0:
+                    continue  # Relative import: intra-package by construction.
+                if node.module is None or node.module == "__future__":
+                    continue  # Degenerate shape or compiler directive.
+                top = node.module.split(".")[0]
+                assert top in stdlib or top in allowed, (
+                    f"{filename}: from {node.module} import ..."
+                )
 
 
 def test_export_surface_pinned() -> None:
