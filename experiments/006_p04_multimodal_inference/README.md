@@ -146,6 +146,80 @@ its historical projections.
   (default calibration uses a separate directory and is re-inferred in
   the full run; costed accordingly).
 
+## Temporal analysis (offline, deterministic)
+
+`temporal.py` groups frame-level observations into evidence-linked
+candidate events without model calls. No recipe is produced here.
+
+Approach: validate and timestamp-order observations (single-manifest
+integrity, unique indices); split maximal runs on label change or
+timestamp gaps (> 1.5 s); build scale-visibility intervals with
+per-reading parse status (`ok`, `normalized`, `null_input`,
+`unparseable`); detect numerically equal runs (default minimum 3) as
+stable readings; flag steps over 100.0 as abrupt and
+neighbor-agreeing outliers as spikes; group consecutive addition,
+removal, and tare frames into single candidates; associate actions
+with scale intervals overlapping a ±5.0 s window. Display strings are
+never converted to quantities; identities, units, and steps are never
+invented. All thresholds are explicit CLI parameters, not
+measurements.
+
+Normalization rule: a detached leading sign (`- 750` → −750.0) admits
+exactly one numeric parse and is normalized with note
+`sign_space_removed`. Internal spacing between digits (`5 15`) admits
+several readings and is ambiguous: value `None`, status `unparseable`,
+note `ambiguous_internal_spacing`, raw string preserved. Contextual
+fit with neighboring values is never used to disambiguate a string.
+
+Review reasons: every event carries machine-readable `review_reasons`
+(empty for clean candidates) alongside human-readable notes —
+`temporal_inconsistency` (abrupt steps, spikes, abrupt stable-run
+borders), `ambiguous_parsing` (unparseable displays, including
+borders), `insufficient_evidence` (actions without nearby scale
+evidence), `low_confidence_observation`. The summary counts reason
+occurrences in `by_review_reason`.
+
+Uncertainty propagation: each stable run records its enclosing
+visibility interval and that interval's status. A run is
+`needs_review` when its own frames are low-confidence, when an
+immediately bordering readable observation is abrupt, unparseable, or
+low-confidence, or when a spike overlaps the run; bordering evidence
+is cited in `contradicting_evidence`. An unreadable neighbor is an
+ordinary segmentation boundary, not evidence against the run. When the
+enclosing interval is flagged but the run's borders are locally
+consistent, the run stays `candidate` with an explicit context note —
+plateaus between genuine mass transitions are expected, not
+contradictions.
+
+Grouping rule: stable runs require exact numeric equality with zero
+tolerance, so adjacent runs of distinct values (P04: 69 vs 68 near
+t = 159–190, split further by a single 68 frame at t = 166 and by
+readability breaks) are never merged and no shared measurement is
+inferred. Runs additionally split on timestamp gaps and on readability
+loss. Temporal gaps, tolerance (fixed at zero), and readability
+jointly determine grouping; none is inferred from the others.
+
+Heuristics vs accuracy: `candidate` means the derivation followed the
+documented rules from the recorded observations — it asserts nothing
+about visual correctness of the underlying model readings. Abrupt
+steps often reflect genuine additions; stability asserts display
+repetition, never a verified mass. Statuses: `candidate` for clean
+deterministic derivations, `needs_review` for the reason-coded cases
+above.
+
+Artifact: `data/processed/experiment_006/temporal/<run>/temporal_events.json`
+(gitignored), versioned `artifact_version: 1.1.0`, carrying source
+provenance, parameters, gaps, events (IDs, types, timestamps, frame
+and observation refs, verbatim strings, unambiguous numerics,
+consistency, supporting/contradicting evidence, status, review
+reasons, notes), and a count summary. Input observations are never
+modified.
+
+```powershell
+uv run python -m pytest tests/test_p04_temporal.py -v
+uv run python experiments/006_p04_multimodal_inference/temporal.py data/processed/experiment_006/full_run/p04_full_4096/observations data/processed/experiment_006/temporal/p04_full_4096/temporal_events.json
+```
+
 ## Data basis
 
 P04 media comes from EPIC-KITCHENS-100 (CC BY-NC-ND 4.0). This
