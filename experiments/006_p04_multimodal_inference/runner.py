@@ -17,6 +17,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from lifecycle import (
+    TERMINAL_EXHAUSTED,
+    TERMINAL_FAILED,
+    TERMINAL_VALID,
+    BudgetPolicy,
+    decide_attempt,
+    estimate_cost,
+)
 from meta_client import (
     MAX_IMAGES_PER_REQUEST,
     InferenceResult,
@@ -30,6 +38,7 @@ from prompts import (
     REVIEW_OUTPUT_FIELDS,
     build_observation,
     format_review_prompt,
+    parse_model_json,
     prompt_hash,
 )
 
@@ -195,6 +204,8 @@ class RunConfig:
     batch_size: int = DEFAULT_BATCH_SIZE
     images_per_request: int = DEFAULT_IMAGES_PER_REQUEST
     max_output_tokens: int = 1024
+    token_budgets: tuple[int, ...] = (1024,)
+    store: bool = True
     timeout_seconds: float = 120.0
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS
@@ -231,6 +242,47 @@ class Runner:
         delay = min(delay, self.config.backoff_cap_seconds)
         return delay + rng.uniform(0.0, delay * 0.25)
 
+    def _transport_attempts(
+        self,
+        client: MetaClient,
+        prompt_text: str,
+        image_paths: Sequence[Path],
+        api_key: str,
+        rng: random.Random,
+        budget: int,
+        first_number: int,
+    ) -> tuple[InferenceResult | None, list[dict[str, Any]], str | None]:
+        """Transport retry loop for one output-token budget.
+
+        Identical to the historical behavior; each entry additionally
+        carries its budget. Transport retries never change budgets.
+        """
+        attempts: list[dict[str, Any]] = []
+        for step in range(self.config.max_attempts):
+            attempt = first_number + step
+            try:
+                result = client.submit(prompt_text, image_paths, api_key)
+            except ProviderError as exc:
+                attempts.append({
+                    "attempt": attempt, "budget": budget,
+                    "code": exc.code, "message": exc.message,
+                    "status_code": exc.status_code,
+                })
+                if exc.code in ABORT_CODES:
+                    raise
+                if exc.code in RETRYABLE_CODES and step + 1 < self.config.max_attempts:
+                    wait = exc.retry_after_seconds
+                    if wait is None:
+                        wait = self._backoff_delay(step + 1, rng)
+                    self.config.sleeper(wait)
+                    attempts[-1]["slept_seconds"] = wait
+                    continue
+                return None, attempts, exc.code
+            attempts.append({"attempt": attempt, "budget": budget,
+                             "code": "ok"})
+            return result, attempts, None
+        return None, attempts, "RETRIES_EXHAUSTED"
+
     def _request_with_retry(
         self,
         client: MetaClient,
@@ -238,32 +290,70 @@ class Runner:
         image_paths: Sequence[Path],
         api_key: str,
         rng: random.Random,
-    ) -> tuple[InferenceResult | None, list[dict[str, Any]], str | None]:
+        policy: BudgetPolicy,
+    ) -> tuple[InferenceResult | None, list[dict[str, Any]],
+                str | None, dict[str, Any]]:
+        """Budget escalation around transport retries.
+
+        Returns (result, attempts, error_code, lifecycle_info). With
+        the default single budget the observable behavior matches the
+        historical runner exactly; error codes are preserved and only
+        additive lifecycle keys are new.
+        """
         attempts: list[dict[str, Any]] = []
-        for attempt in range(1, self.config.max_attempts + 1):
-            try:
-                result = client.submit(prompt_text, image_paths, api_key)
-            except ProviderError as exc:
-                attempts.append({
-                    "attempt": attempt, "code": exc.code,
-                    "message": exc.message,
-                    "status_code": exc.status_code,
+        budgets_used: list[int] = []
+        superseded: list[dict[str, int | None]] = []
+        transport_retries = 0
+        for position, budget in enumerate(policy.budgets):
+            client.max_output_tokens = budget
+            first_number = len(attempts) + 1
+            result, tried, error = self._transport_attempts(
+                client, prompt_text, image_paths, api_key, rng,
+                budget, first_number,
+            )
+            attempts.extend(tried)
+            budgets_used.append(budget)
+            transport_retries += max(0, len(tried) - 1)
+            if error is not None or result is None:
+                return None, attempts, error, {
+                    "terminal": TERMINAL_FAILED,
+                    "incomplete_reason": None,
+                    "budgets_used": budgets_used,
+                    "transport_retries": transport_retries,
+                    "superseded_usage": superseded,
+                }
+            if result.status == "completed":
+                return result, attempts, None, {
+                    "terminal": None,  # classified after parsing
+                    "incomplete_reason": result.incomplete_reason,
+                    "budgets_used": budgets_used,
+                    "transport_retries": transport_retries,
+                    "superseded_usage": superseded,
+                }
+            decision = decide_attempt(
+                result.status, result.incomplete_reason,
+                result.output_text, False, position + 1, policy,
+            )
+            if decision["action"] == "retry":
+                superseded.append({
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
                 })
-                if exc.code in ABORT_CODES:
-                    raise
-                if exc.code in RETRYABLE_CODES and attempt < self.config.max_attempts:
-                    wait = exc.retry_after_seconds
-                    if wait is None:
-                        wait = self._backoff_delay(attempt, rng)
-                    self.config.sleeper(wait)
-                    attempts[-1]["slept_seconds"] = wait
-                    continue
-                return None, attempts, exc.code
-            attempts.append({"attempt": attempt, "code": "ok"})
-            if result.status != "completed":
-                return None, attempts, "INCOMPLETE_STATUS"
-            return result, attempts, None
-        return None, attempts, "RETRIES_EXHAUSTED"
+                continue
+            return None, attempts, "INCOMPLETE_STATUS", {
+                "terminal": decision["terminal"],
+                "incomplete_reason": result.incomplete_reason,
+                "budgets_used": budgets_used,
+                "transport_retries": transport_retries,
+                "superseded_usage": superseded,
+            }
+        return None, attempts, "INCOMPLETE_STATUS", {
+            "terminal": TERMINAL_EXHAUSTED,
+            "incomplete_reason": None,
+            "budgets_used": budgets_used,
+            "transport_retries": transport_retries,
+            "superseded_usage": superseded,
+        }
 
     def _load_checkpoint_index(self, path: Path) -> dict[str, Any]:
         completed: dict[str, Any] = {}
@@ -320,6 +410,13 @@ class Runner:
                     "INVALID_CONFIG",
                     "Review passes require primary observations.",
                 )
+        budgets = tuple(cfg.token_budgets)
+        if budgets == (1024,) and cfg.max_output_tokens != 1024:
+            budgets = (cfg.max_output_tokens,)
+        try:
+            policy = BudgetPolicy(budgets=budgets)
+        except ValueError as exc:
+            raise RunnerError("INVALID_CONFIG", str(exc)) from exc
         rates = resolve_rates(
             cfg.model, cfg.price_input_per_m, cfg.price_output_per_m
         )
@@ -347,6 +444,8 @@ class Runner:
                     f"Corrupt JPEG for frame {row['frame_index']}.",
                     str(row["frame_index"]),
                 )
+            row["image_sha256"] = hashlib.sha256(blob).hexdigest()
+            row["image_encoding"] = "jpeg"
         paths = self._paths()
         for key in ("raw", "obs", "reports"):
             paths[key].mkdir(parents=True, exist_ok=True)
@@ -360,14 +459,15 @@ class Runner:
         client_kwargs: dict[str, Any] = {
             "model": cfg.model,
             "timeout_seconds": cfg.timeout_seconds,
-            "max_output_tokens": cfg.max_output_tokens,
+            "max_output_tokens": budgets[0],
+            "store": cfg.store,
             "clock": cfg.clock,
         }
         if cfg.client_factory is not None:
             client_kwargs["client_factory"] = cfg.client_factory
         client = MetaClient(**client_kwargs)
         rng = random.Random(cfg.jitter_seed)
-        stats = {
+        stats: dict[str, Any] = {
             "batches_total": 0,
             "batches_completed": sum(
                 1 for record in completed.values()
@@ -376,6 +476,12 @@ class Runner:
             "requests_sent": 0, "retries": 0,
             "input_tokens": 0, "output_tokens": 0,
             "needs_review": 0,
+            "terminal_states": {},
+            "token_retries": 0,
+            "token_retry_input_tokens": 0,
+            "token_retry_output_tokens": 0,
+            "token_retried_requests": 0,
+            "token_recovered": 0,
         }
         for first, last in batch_ranges(len(rows), cfg.batch_size):
             stats["batches_total"] += 1
@@ -387,13 +493,26 @@ class Runner:
             if batch_id in completed and completed[batch_id].get("status") == "completed":
                 continue
             batch_result = self._run_batch(
-                client, cfg, span, batch_id, manifest_ref,
+                client, cfg, policy, span, batch_id, manifest_ref,
                 prompt_digest, api_key, rng, paths,
             )
             stats["requests_sent"] += batch_result["requests_sent"]
             stats["retries"] += batch_result["retries"]
             stats["input_tokens"] += batch_result["input_tokens"]
             stats["output_tokens"] += batch_result["output_tokens"]
+            for terminal, count in batch_result[
+                    "terminal_states"].items():
+                stats["terminal_states"][terminal] = (
+                    stats["terminal_states"].get(terminal, 0) + count
+                )
+            stats["token_retries"] += batch_result["token_retries"]
+            stats["token_retry_input_tokens"] += batch_result[
+                "token_retry_input_tokens"]
+            stats["token_retry_output_tokens"] += batch_result[
+                "token_retry_output_tokens"]
+            stats["token_retried_requests"] += batch_result[
+                "token_retried_requests"]
+            stats["token_recovered"] += batch_result["token_recovered"]
             if batch_result["status"] == "completed":
                 stats["batches_completed"] += 1
             else:
@@ -401,7 +520,7 @@ class Runner:
         return self._write_report(paths, cfg, manifest_hash, stats, rates)
 
     def _run_batch(
-        self, client: MetaClient, cfg: RunConfig,
+        self, client: MetaClient, cfg: RunConfig, policy: BudgetPolicy,
         span: list[dict[str, Any]], batch_id: str,
         manifest_ref: dict[str, str], prompt_digest: str,
         api_key: str, rng: random.Random, paths: dict[str, Path],
@@ -413,6 +532,12 @@ class Runner:
         requests_sent = retries = 0
         input_tokens = output_tokens = 0
         batch_failed = False
+        terminal_states: dict[str, int] = {}
+        token_retries = 0
+        token_retry_input_tokens = 0
+        token_retry_output_tokens = 0
+        token_retried_requests = 0
+        token_recovered = 0
         step = cfg.images_per_request
         fields = REVIEW_OUTPUT_FIELDS if cfg.is_review else MODEL_OUTPUT_FIELDS
         for offset in range(0, len(span), step):
@@ -437,26 +562,57 @@ class Runner:
                     primary_json.encode("utf-8")
                 ).hexdigest()
                 request_text = format_review_prompt(primary_json)
-            result, attempts, error = self._request_with_retry(
-                client, request_text, image_paths, api_key, rng
+            result, attempts, error, info = self._request_with_retry(
+                client, request_text, image_paths, api_key, rng,
+                policy,
             )
             requests_sent += 1
-            retries += max(0, len(attempts) - 1)
+            retries += info["transport_retries"]
+            budgets_used = info["budgets_used"]
+            token_retries += max(0, len(budgets_used) - 1)
+            for usage in info["superseded_usage"]:
+                if usage["input_tokens"] is not None:
+                    token_retry_input_tokens += usage["input_tokens"]
+                if usage["output_tokens"] is not None:
+                    token_retry_output_tokens += usage["output_tokens"]
+            if len(budgets_used) > 1:
+                token_retried_requests += 1
             attempts_log.append({
                 "frame_indices": [row["frame_index"] for row in group],
                 "attempts": attempts,
             })
             if error is not None or result is None:
                 batch_failed = True
+                terminal_states[info["terminal"]] = (
+                    terminal_states.get(info["terminal"], 0) + 1
+                )
                 raw_records.append({
                     "frame_indices": [row["frame_index"] for row in group],
                     "error_code": error, "attempts": attempts,
+                    "terminal_state": info["terminal"],
+                    "incomplete_reason": info["incomplete_reason"],
+                    "budgets_attempted": budgets_used,
                 })
                 continue
             if result.input_tokens is not None:
                 input_tokens += result.input_tokens
             if result.output_tokens is not None:
                 output_tokens += result.output_tokens
+            parsed, _ = parse_model_json(result.output_text)
+            abstained_hint = (
+                not cfg.is_review and parsed is not None
+                and parsed.get("scale_readable") is False
+            )
+            terminal = decide_attempt(
+                result.status, result.incomplete_reason,
+                result.output_text, parsed is not None,
+                len(budgets_used), policy, abstained_hint,
+            )["terminal"]
+            terminal_states[terminal] = (
+                terminal_states.get(terminal, 0) + 1
+            )
+            if terminal == TERMINAL_VALID and len(budgets_used) > 1:
+                token_recovered += 1
             raw_records.append({
                 "frame_indices": [row["frame_index"] for row in group],
                 "model": result.model, "status": result.status,
@@ -469,23 +625,37 @@ class Runner:
                 "latency_seconds": result.latency_seconds,
                 "request_id": result.request_id,
                 "attempts": attempts,
+                "terminal_state": terminal,
+                "incomplete_reason": result.incomplete_reason,
+                "budgets_attempted": budgets_used,
             })
             call_provenance = {
                 "provider": "meta", "model": result.model,
                 "prompt_sha256": prompt_digest,
                 "review_of_sha256": review_hash,
-                "max_output_tokens": cfg.max_output_tokens,
+                "max_output_tokens": budgets_used[-1],
+                "token_budgets_attempted": budgets_used,
+                "store": cfg.store,
                 "timeout_seconds": cfg.timeout_seconds,
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
+                "reasoning_output_tokens": result.reasoning_output_tokens,
                 "latency_seconds": result.latency_seconds,
                 "request_id": result.request_id,
                 "attempts": len(attempts),
+                "response_status": result.status,
+                "incomplete_reason": result.incomplete_reason,
+                "terminal_state": terminal,
             }
             for row in group:
                 observations.append(build_observation(
                     row, manifest_ref, batch_id, cfg.pass_id,
                     call_provenance, result.output_text, fields,
+                    response_status=result.status,
+                    incomplete_reason=result.incomplete_reason,
+                    terminal_state=terminal,
+                    image_sha256=row.get("image_sha256"),
+                    image_encoding=row.get("image_encoding"),
                 ))
         status = "needs_human_review" if batch_failed else "completed"
         raw_path = paths["raw"] / f"{batch_id}.json"
@@ -510,11 +680,17 @@ class Runner:
             "status": status, "requests_sent": requests_sent,
             "retries": retries, "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "terminal_states": terminal_states,
+            "token_retries": token_retries,
+            "token_retry_input_tokens": token_retry_input_tokens,
+            "token_retry_output_tokens": token_retry_output_tokens,
+            "token_retried_requests": token_retried_requests,
+            "token_recovered": token_recovered,
         }
 
     def _write_report(
         self, paths: dict[str, Path], cfg: RunConfig,
-        manifest_hash: str, stats: dict[str, int],
+        manifest_hash: str, stats: dict[str, Any],
         rates: tuple[float, float] | None,
     ) -> dict[str, Any]:
         state = {
@@ -536,15 +712,41 @@ class Runner:
             state["rates_usd_per_m"] = {
                 "input": rates[0], "output": rates[1],
             }
-            state["cost_usd_estimated"] = round(
-                stats["input_tokens"] * rates[0] / 1_000_000
-                + stats["output_tokens"] * rates[1] / 1_000_000,
-                4,
+            state["cost_usd_estimated"] = estimate_cost(
+                stats["input_tokens"], stats["output_tokens"], rates,
             )
             state["cost_status"] = "estimated_from_published_rates"
         else:
             state["cost_usd_estimated"] = None
             state["cost_status"] = "COST_UNKNOWN"
+        terminal_states = stats.get("terminal_states", {})
+        classified = sum(terminal_states.get(key, 0) for key in (
+            "valid_prediction", "abstained", "invalid_json",
+        ))
+        retried = stats.get("token_retried_requests", 0)
+        state["lifecycle"] = {
+            "terminal_states": dict(sorted(terminal_states.items())),
+            "classified_total": classified,
+            "abstention_rate": (
+                terminal_states.get("abstained", 0) / classified
+                if classified else None
+            ),
+            "invalid_rate": (
+                terminal_states.get("invalid_json", 0) / classified
+                if classified else None
+            ),
+            "token_retries": stats.get("token_retries", 0),
+            "token_retried_requests": retried,
+            "recovery_rate": (
+                stats.get("token_recovered", 0) / retried
+                if retried else None
+            ),
+            "token_retry_cost_usd_estimated": estimate_cost(
+                stats.get("token_retry_input_tokens", 0),
+                stats.get("token_retry_output_tokens", 0),
+                rates,
+            ),
+        }
         self._write_json(paths["state"], state)
         self._write_json(paths["reports"] / "run_report.json", state)
         return state

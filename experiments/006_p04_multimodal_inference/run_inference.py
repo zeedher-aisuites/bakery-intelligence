@@ -50,6 +50,18 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         "--images-per-request", type=int, default=DEFAULT_IMAGES_PER_REQUEST
     )
     parser.add_argument("--max-output-tokens", type=int, default=1024)
+    parser.add_argument(
+        "--token-budgets", default="1024",
+        help="Comma-separated output-token escalation, e.g. 1024,2048,3072.",
+    )
+    parser.add_argument(
+        "--store", dest="store", action="store_true", default=True,
+        help="Persist responses server-side (API default).",
+    )
+    parser.add_argument(
+        "--no-store", dest="store", action="store_false",
+        help="Send store=false for oversized-payload compatibility.",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
     parser.add_argument("--max-attempts", type=int, default=4)
     parser.add_argument("--price-input", type=float, default=None)
@@ -74,6 +86,22 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_budgets(text: str) -> tuple[int, ...]:
+    try:
+        budgets = tuple(int(part) for part in text.split(",") if part.strip())
+    except ValueError as exc:
+        raise RunnerError(
+            "INVALID_CONFIG",
+            f"Unparseable --token-budgets: {text!r}.",
+        ) from exc
+    if not budgets or any(budget <= 0 for budget in budgets):
+        raise RunnerError(
+            "INVALID_CONFIG",
+            f"Unparseable --token-budgets: {text!r}.",
+        )
+    return budgets
+
+
 def _run_config_from_args(
     args: argparse.Namespace,
     run_dir: Path,
@@ -90,6 +118,8 @@ def _run_config_from_args(
         batch_size=args.batch_size,
         images_per_request=args.images_per_request,
         max_output_tokens=args.max_output_tokens,
+        token_budgets=_parse_budgets(args.token_budgets),
+        store=args.store,
         timeout_seconds=args.timeout_seconds,
         max_attempts=args.max_attempts,
         price_input_per_m=args.price_input,

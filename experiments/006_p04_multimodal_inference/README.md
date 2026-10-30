@@ -46,22 +46,34 @@ multi-image requests never sent from this repo (default stays
 ## Architecture
 
 - `meta_client.py`: Responses client, env keys (`META_API_KEY`, then
-  `MODEL_API_KEY`), base64 data-URL images, normalized results, named
-  error codes, injectable client factory (mock seam), zero-generation
-  `list_models` preflight.
+  `MODEL_API_KEY`), base64 data-URL images, normalized results with
+  incomplete-reason capture, configurable request `store` flag
+  (default true), named error codes, injectable client factory
+  (mock seam), zero-generation `list_models` preflight.
+- `lifecycle.py`: reusable terminal outcomes (`valid_prediction`,
+  `invalid_json`, `empty_output`, `exhausted_token_budget`,
+  `request_failed`, `unsupported_response`, `abstained`), token-budget
+  policy with escalation only on explicit token exhaustion, and
+  none-safe cost estimation.
 - `prompts.py`: frozen primary/review prompts with SHA-256 pinning,
   defensive JSON parsing (unparseable replies preserved, never
-  invented), observation builder with per-pass field schemas, review
-  prompt formatter (primary JSON attached), deterministic selection.
+  invented), observation builder with per-pass field schemas and
+  optional lifecycle evidence, review prompt formatter (primary JSON
+  attached), deterministic selection.
 - `runner.py`: manifest validation (exact header, 685 rows anchored at
   0..34200, step-50 indices, `timestamp == index/50`, JPEG magic
-  bytes), contiguous batches, bounded retries (max 4, base 0.5 s ×2 +
-  jitter, `Retry-After` honored; 401/400/413 never retried),
-  multi-image requests gated behind an explicit opt-in flag,
-  append-only JSONL checkpoints + atomic `run_state.json`, per-model
-  cost aggregation (Spark $1.25/$4.25, Wonder $4.00/$20.00).
+  bytes), contiguous batches, bounded transport retries (max 4, base
+  0.5 s ×2 + jitter, `Retry-After` honored; 401/400/413 never
+  retried) kept separate from token-budget escalation (default single
+  1024 budget, preserving historical behavior; configurable via
+  `--token-budgets`), multi-image requests gated behind an explicit
+  opt-in flag, append-only JSONL checkpoints + atomic
+  `run_state.json`, per-model cost aggregation (Spark $1.25/$4.25,
+  Wonder $4.00/$20.00), lifecycle terminal counts and recovery rates
+  in the report.
 - `run_inference.py`: `preflight`, `calibrate`, `run`, `select-review`,
-  `review`, `report` subcommands.
+  `review`, `report` subcommands, plus `--token-budgets` and
+  `--store`/`--no-store` inference options.
 
 Batch completion requires raw responses, parsed observations, and the
 checkpoint record all durable. Resume replays checkpoints and never
@@ -75,6 +87,25 @@ manifest timestamps verbatim, `timestamp_basis: frame_index_over_fps`,
 manifest hash, batch/range/pass IDs, and full call provenance. Model
 fields stay visible-evidence-only with explicit nulls; display strings
 are never converted to quantities; contradictions are preserved.
+Lifecycle evidence is additive: `response_status`,
+`incomplete_reason`, `terminal_state`, `image_ref` (SHA-256,
+encoding), attempted budgets, store setting, and reasoning tokens.
+Older artifacts lack these keys; readers treat absence as unknown.
+
+## Inference lifecycle
+
+Each request ends in one terminal state (`valid_prediction`,
+`invalid_json`, `empty_output`, `exhausted_token_budget`,
+`request_failed`, `unsupported_response`, `abstained`), separating
+HTTP transport success from structured-inference success. Token
+budgets escalate (default `1024`, experimentally exercised
+`1024,2048,3072`) only when the API explicitly reports output-token
+exhaustion; content, confidence, and reference agreement never
+trigger retries. Transport retries keep their historical backoff and
+never change budgets. The run report adds terminal counts,
+abstention/invalid rates, token-retry overhead with estimated cost,
+and recovery rate. Defaults preserve historical behavior exactly;
+see `lifecycle.py` for the policy contract.
 
 ## Review pass
 

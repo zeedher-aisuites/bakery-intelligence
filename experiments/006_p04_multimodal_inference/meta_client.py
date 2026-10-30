@@ -58,6 +58,7 @@ class InferenceResult:
     latency_seconds: float = 0.0
     request_id: str | None = None
     raw_status_details: Any = None
+    incomplete_reason: str | None = None
 
 
 def resolve_api_key(env: dict[str, str] | None = None) -> str:
@@ -114,6 +115,7 @@ class MetaClient:
     model: str = MODEL_SPARK
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    store: bool = True
     client_factory: Callable[[str, float], Any] = _default_client_factory
     clock: Callable[[], float] = time.perf_counter
     _client: Any = field(default=None, repr=False)
@@ -161,6 +163,7 @@ class MetaClient:
                 model=self.model,
                 input=[{"role": "user", "content": chunks}],
                 max_output_tokens=self.max_output_tokens,
+                store=self.store,
             )
         except Exception as exc:  # Mapped below; never leaks the key.
             raise self._map_exception(exc) from exc
@@ -228,6 +231,13 @@ class MetaClient:
             details_out = dumped.get("output_tokens_details") or {}
             cached = details_in.get("cached_tokens")
             reasoning = details_out.get("reasoning_tokens")
+        details = getattr(response, "incomplete_details", None)
+        if isinstance(details, dict):
+            incomplete_reason = details.get("reason")
+        else:
+            incomplete_reason = getattr(details, "reason", None)
+        if incomplete_reason is not None:
+            incomplete_reason = str(incomplete_reason)
         return InferenceResult(
             model=getattr(response, "model", self.model),
             status=status,
@@ -239,9 +249,8 @@ class MetaClient:
             reasoning_output_tokens=reasoning,
             latency_seconds=latency,
             request_id=getattr(response, "id", None),
-            raw_status_details=getattr(
-                response, "incomplete_details", None
-            ),
+            raw_status_details=details,
+            incomplete_reason=incomplete_reason,
         )
 
 

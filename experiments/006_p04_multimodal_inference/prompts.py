@@ -95,8 +95,18 @@ def build_observation(
     call_provenance: dict[str, Any],
     raw_text: str,
     fields: tuple[str, ...] = MODEL_OUTPUT_FIELDS,
+    response_status: str | None = None,
+    incomplete_reason: str | None = None,
+    terminal_state: str | None = None,
+    image_sha256: str | None = None,
+    image_encoding: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble one timestamp-grounded prediction record."""
+    """Assemble one timestamp-grounded prediction record.
+
+    The trailing lifecycle arguments are optional evidence; older
+    callers omit them and older artifacts lack the keys. Readers must
+    treat absent keys as unknown, never as failure.
+    """
     parsed, parse_error = parse_model_json(raw_text)
     model_fields: dict[str, Any] = {name: None for name in fields}
     if parsed is not None:
@@ -119,6 +129,13 @@ def build_observation(
         "model_fields": model_fields,
         "parse_error": parse_error,
         "raw_text_excerpt": raw_text[:500],
+        "response_status": response_status,
+        "incomplete_reason": incomplete_reason,
+        "terminal_state": terminal_state,
+        "image_ref": {
+            "sha256": image_sha256,
+            "encoding": image_encoding,
+        },
     }
 
 
