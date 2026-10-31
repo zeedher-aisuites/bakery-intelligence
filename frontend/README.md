@@ -37,6 +37,12 @@ The workflow radio group selects the queued workflow explicitly:
   `docs/m206/offline-integration.md` and
   `fixtures/offline/offline_bundle_http_example.json`). No
   inference, network, or paid services are involved.
+- **Offline video pipeline**: upload a small video (max
+  16 MB). The worker stages it, extracts frames at 1 FPS,
+  runs deterministic fake inference, and reconstructs a
+  draft. All model outputs are synthetic test vectors,
+  labeled as such in the run summary; see
+  `docs/m206/pipeline-offline.md`.
 
 Completed offline runs render a review section below the status
 cards: run summary with honesty flags, the recipe draft with its

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   WORKFLOW_OFFLINE,
+  WORKFLOW_PIPELINE,
   WORKFLOW_SMOKE,
   artifactUrl,
   createAnalysis,
@@ -13,14 +14,17 @@ import {
   type Health,
 } from "./api";
 import {
+  isPipelineSummary,
   numeric,
   seconds,
   sourceChip,
   statusPill,
+  summaryArtifactId,
   text,
   unitLabel,
   type MeasurementBundle,
   type OfflineSummary,
+  type PipelineSummary,
   type RecipeDraft,
   type UnitResolution,
   type ValidationResult,
@@ -37,11 +41,11 @@ type ResultsState =
   | { kind: "error"; message: string }
   | {
       kind: "ready";
-      summary: OfflineSummary;
-      draft: RecipeDraft;
-      measurements: MeasurementBundle;
-      validation: ValidationResult;
-      weighing: WeighingEvent;
+      summary: OfflineSummary | PipelineSummary;
+      draft: RecipeDraft | null;
+      measurements: MeasurementBundle | null;
+      validation: ValidationResult | null;
+      weighing: WeighingEvent | null;
     };
 
 const TERMINAL = new Set(["completed", "failed"]);
@@ -127,10 +131,12 @@ export default function App() {
   }
 
   const isOffline = workflow === WORKFLOW_OFFLINE;
+  const isPipeline = workflow === WORKFLOW_PIPELINE;
   const showResults =
     run !== null &&
     run.status === "completed" &&
-    run.workflow === WORKFLOW_OFFLINE;
+    (run.workflow === WORKFLOW_OFFLINE ||
+      run.workflow === WORKFLOW_PIPELINE);
 
   return (
     <div className="page">
@@ -180,15 +186,39 @@ export default function App() {
                 </span>
               </span>
             </label>
+            <label>
+              <input
+                type="radio"
+                name="workflow"
+                value={WORKFLOW_PIPELINE}
+                checked={workflow === WORKFLOW_PIPELINE}
+                onChange={() => selectWorkflow(WORKFLOW_PIPELINE)}
+              />
+              <span>
+                <strong>Offline video pipeline</strong>
+                <span className="hint">
+                  {" "}
+                  Stages a small video, extracts frames, and
+                  reconstructs with deterministic fake inference.
+                  Synthetic test vectors only, never real models.
+                </span>
+              </span>
+            </label>
           </fieldset>
           <p className="hint">
             {isOffline
               ? "Upload a JSON offline bundle (bakery-offline-bundle/1). The worker reconstructs measurements and a draft from its evidence."
-              : "Upload a small test file. The backend stores it, verifies its SHA-256, and records a result artifact. No video is analyzed."}
+              : isPipeline
+                ? "Upload a small video (max 16 MB). The worker stages it, extracts frames at 1 FPS, runs fake inference, and reconstructs a draft."
+                : "Upload a small test file. The backend stores it, verifies its SHA-256, and records a result artifact. No video is analyzed."}
           </p>
           <label className="field">
             <span>
-              {isOffline ? "Evidence bundle (JSON, max 16 MB)" : "Test file (max 16 MB)"}
+              {isOffline
+                ? "Evidence bundle (JSON, max 16 MB)"
+                : isPipeline
+                  ? "Video file (max 16 MB)"
+                  : "Test file (max 16 MB)"}
             </span>
             <input
               key={workflow}
@@ -213,7 +243,9 @@ export default function App() {
               ? "Submitting…"
               : isOffline
                 ? "Run offline reconstruction"
-                : "Run storage smoke test"}
+                : isPipeline
+                  ? "Run offline video pipeline"
+                  : "Run storage smoke test"}
           </button>
           {error && <p className="error" role="alert">{error}</p>}
         </section>
@@ -260,7 +292,11 @@ export default function App() {
         </section>
 
         {showResults && run && (
-          <ReconstructionResults key={run.run_id} runId={run.run_id} />
+          <ReconstructionResults
+            key={run.run_id}
+            runId={run.run_id}
+            workflow={run.workflow}
+          />
         )}
       </main>
 
@@ -274,23 +310,51 @@ export default function App() {
   );
 }
 
-function ReconstructionResults({ runId }: { runId: string }) {
+function ReconstructionResults({
+  runId,
+  workflow,
+}: {
+  runId: string;
+  workflow: string;
+}) {
   const [state, setState] = useState<ResultsState>({ kind: "loading" });
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      try {
-        const [summary, draft, measurements, validation, weighing] =
-          await Promise.all([
-            fetchArtifactJson<OfflineSummary>(runId, "offline_summary.json"),
-            fetchArtifactJson<RecipeDraft>(runId, "recipe_draft.json"),
-            fetchArtifactJson<MeasurementBundle>(runId, "measurements.json"),
-            fetchArtifactJson<ValidationResult>(runId, "validation.json"),
-            fetchArtifactJson<WeighingEvent>(runId, "weighing_event.json"),
-          ]);
+      const summaryId = summaryArtifactId(workflow);
+      if (summaryId === null) {
         if (!cancelled) {
-          setState({ kind: "ready", summary, draft, measurements, validation, weighing });
+          setState({
+            kind: "error",
+            message: `No results view for workflow ${workflow}.`,
+          });
+        }
+        return;
+      }
+      try {
+        const summary = await fetchArtifactJson<
+          OfflineSummary | PipelineSummary
+        >(runId, summaryId);
+        if (cancelled) return;
+        const [draftR, measR, validR, weighR] = await Promise.allSettled([
+          fetchArtifactJson<RecipeDraft>(runId, "recipe_draft.json"),
+          fetchArtifactJson<MeasurementBundle>(runId, "measurements.json"),
+          fetchArtifactJson<ValidationResult>(runId, "validation.json"),
+          fetchArtifactJson<WeighingEvent>(runId, "weighing_event.json"),
+        ]);
+        if (!cancelled) {
+          setState({
+            kind: "ready",
+            summary,
+            draft: draftR.status === "fulfilled" ? draftR.value : null,
+            measurements:
+              measR.status === "fulfilled" ? measR.value : null,
+            validation:
+              validR.status === "fulfilled" ? validR.value : null,
+            weighing:
+              weighR.status === "fulfilled" ? weighR.value : null,
+          });
         }
       } catch (err) {
         if (!cancelled) {
@@ -305,7 +369,7 @@ function ReconstructionResults({ runId }: { runId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [runId, workflow]);
 
   if (state.kind === "loading") {
     return (
@@ -330,9 +394,9 @@ function ReconstructionResults({ runId }: { runId: string }) {
 
   const { summary, draft, measurements, validation, weighing } = state;
   const resolutions = new Map<string, UnitResolution>(
-    measurements.measurements.map((item) => [
+    (measurements === null ? [] : measurements.measurements).map((item) => [
       item.measurement_id,
-      measurements.unit_resolutions.find(
+      (measurements === null ? [] : measurements.unit_resolutions).find(
         (entry) => entry.measurement_id === item.measurement_id,
       ),
     ]).filter((entry): entry is [string, UnitResolution] => entry[1] !== undefined),
@@ -342,6 +406,15 @@ function ReconstructionResults({ runId }: { runId: string }) {
     <section className="card wide">
       <h2>Reconstruction results</h2>
       <p className="hint">{summary.note}</p>
+      {isPipelineSummary(summary) && (
+        <p>
+          <span className="pill pill-pending">
+            Deterministic fake inference — synthetic test vectors, not Meta
+            predictions
+          </span>{" "}
+          <code>{summary.fake_model_id}</code>
+        </p>
+      )}
       <div className="flag-row">
         <Flag off={!summary.inference_performed} label="model inference" />
         <Flag off={!summary.network_accessed} label="network access" />
@@ -352,14 +425,35 @@ function ReconstructionResults({ runId }: { runId: string }) {
       <dl className="facts">
         <dt>Draft</dt>
         <dd><code>{summary.draft_id}</code></dd>
-        <dt>Video</dt>
-        <dd><code>{summary.video_id}</code></dd>
-        <dt>Event</dt>
-        <dd><code>{summary.event_id}</code></dd>
+        {isPipelineSummary(summary) ? (
+          <>
+            <dt>Video file</dt>
+            <dd><code>{summary.video.file_name}</code></dd>
+            <dt>First pass</dt>
+            <dd>
+              {summary.firstpass.frames_observed} observed ·{" "}
+              {summary.firstpass.frames_failed} failed ·{" "}
+              <code>{summary.firstpass.model}</code>
+            </dd>
+          </>
+        ) : (
+          <>
+            <dt>Video</dt>
+            <dd><code>{summary.video_id}</code></dd>
+            <dt>Event</dt>
+            <dd><code>{summary.event_id}</code></dd>
+          </>
+        )}
         <dt>Window</dt>
         <dd>
-          {seconds(measurements.window.start_seconds)} –{" "}
-          {seconds(measurements.window.end_seconds)}
+          {measurements === null ? (
+            "—"
+          ) : (
+            <>
+              {seconds(measurements.window.start_seconds)} –{" "}
+              {seconds(measurements.window.end_seconds)}
+            </>
+          )}
         </dd>
         <dt>Measurements</dt>
         <dd>{summary.measurements}</dd>
@@ -372,6 +466,10 @@ function ReconstructionResults({ runId }: { runId: string }) {
       </dl>
 
       <h3>Recipe draft</h3>
+      {draft === null ? (
+        <MissingArtifact id="recipe_draft.json" />
+      ) : (
+        <>
       <dl className="facts">
         <dt>Status</dt>
         <dd><span className="pill pill-pending">{draft.status}</span></dd>
@@ -405,8 +503,14 @@ function ReconstructionResults({ runId }: { runId: string }) {
           </p>
         </div>
       ))}
+        </>
+      )}
 
       <h3>Measurements</h3>
+      {measurements === null ? (
+        <MissingArtifact id="measurements.json" />
+      ) : (
+        <>
       <p className="hint">
         Scale display readings only — never net ingredient quantities.
         Verbatim text is the first-pass model reading; the value column
@@ -453,8 +557,14 @@ function ReconstructionResults({ runId }: { runId: string }) {
           </tbody>
         </table>
       </div>
+        </>
+      )}
 
       <h3>Weighing event</h3>
+      {weighing === null ? (
+        <MissingArtifact id="weighing_event.json" />
+      ) : (
+        <>
       <dl className="facts">
         <dt>Event</dt>
         <dd><code>{weighing.event_id}</code></dd>
@@ -489,9 +599,13 @@ function ReconstructionResults({ runId }: { runId: string }) {
         <dd><code>{weighing.verification_status}</code></dd>
       </dl>
       <p className="hint">{weighing.review_notes}</p>
+        </>
+      )}
 
       <h3>Temporal evidence</h3>
-      {measurements.action_evidence.temporal_actions.length === 0 ? (
+      {measurements === null ? (
+        <MissingArtifact id="measurements.json" />
+      ) : measurements.action_evidence.temporal_actions.length === 0 ? (
         <p className="hint">No temporal action candidates linked to this event.</p>
       ) : (
         <ul className="plain-list">
@@ -505,14 +619,18 @@ function ReconstructionResults({ runId }: { runId: string }) {
           ))}
         </ul>
       )}
-      <p className="hint">
-        Addition frames: {measurements.action_evidence.addition_frames.length};
-        removal frames: {measurements.action_evidence.removal_frames.length};
-        tare frames: {measurements.action_evidence.tare_frames.length}.
-      </p>
+      {measurements !== null && (
+        <p className="hint">
+          Addition frames: {measurements.action_evidence.addition_frames.length};
+          removal frames: {measurements.action_evidence.removal_frames.length};
+          tare frames: {measurements.action_evidence.tare_frames.length}.
+        </p>
+      )}
 
       <h3>Unresolved uncertainties</h3>
-      {draft.unresolved_questions.length === 0 ? (
+      {draft === null ? (
+        <MissingArtifact id="recipe_draft.json" />
+      ) : draft.unresolved_questions.length === 0 ? (
         <p className="hint">No unresolved questions recorded.</p>
       ) : (
         <ul className="plain-list">
@@ -525,7 +643,9 @@ function ReconstructionResults({ runId }: { runId: string }) {
       )}
 
       <h3>Validation</h3>
-      {validation.issue_count === 0 ? (
+      {validation === null ? (
+        <MissingArtifact id="validation.json" />
+      ) : validation.issue_count === 0 ? (
         <p>
           <span className="pill pill-ok">0 issues</span>{" "}
           <span className="hint">
@@ -545,6 +665,15 @@ function ReconstructionResults({ runId }: { runId: string }) {
         </ul>
       )}
     </section>
+  );
+}
+
+function MissingArtifact({ id }: { id: string }) {
+  return (
+    <p className="hint">
+      {id} is unavailable for this run; use the artifact links above
+      to inspect the original JSON.
+    </p>
   );
 }
 

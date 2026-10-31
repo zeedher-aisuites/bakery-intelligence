@@ -1,8 +1,9 @@
 export const API_BASE =
-  import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+  import.meta.env?.VITE_API_BASE ?? "http://localhost:8000";
 
 export const WORKFLOW_SMOKE = "storage_smoke";
 export const WORKFLOW_OFFLINE = "offline_reconstruct";
+export const WORKFLOW_PIPELINE = "video_pipeline_offline";
 
 export interface Health {
   status: string;

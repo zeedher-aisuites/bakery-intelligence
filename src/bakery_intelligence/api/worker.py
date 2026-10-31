@@ -28,12 +28,16 @@ from bakery_intelligence.api.jobs import (
     SMOKE_RESULT_ARTIFACT,
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_STORAGE_SMOKE,
+    WORKFLOW_VIDEO_PIPELINE_OFFLINE,
     WORKFLOW_VIDEO_RECONSTRUCT,
     JobRecord,
     utc_now_iso,
 )
 from bakery_intelligence.api.offline import (
     execute_offline_reconstruct,
+)
+from bakery_intelligence.api.pipeline import (
+    execute_video_pipeline_offline,
 )
 from bakery_intelligence.api.video import (
     execute_video_reconstruct,
@@ -61,6 +65,10 @@ WORKFLOW_MAX_ATTEMPTS = {
     # Re-evaluate before any paid stage joins this workflow name:
     # paid operations must never inherit an offline retry budget.
     WORKFLOW_VIDEO_RECONSTRUCT: 2,
+    # Offline pipeline: deterministic fake inference over staged
+    # bytes in a temp directory, idempotent on re-execution.
+    # Same re-evaluation duty applies before any paid stage.
+    WORKFLOW_VIDEO_PIPELINE_OFFLINE: 2,
 }
 
 
@@ -100,6 +108,7 @@ def execute_storage_smoke(storage: StorageBackend,
 _EXECUTORS = {
     WORKFLOW_STORAGE_SMOKE: execute_storage_smoke,
     WORKFLOW_OFFLINE_RECONSTRUCT: execute_offline_reconstruct,
+    WORKFLOW_VIDEO_PIPELINE_OFFLINE: execute_video_pipeline_offline,
 }
 
 

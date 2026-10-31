@@ -2,6 +2,9 @@
 // offline reconstruction review UI (M2-06B.2). Shapes mirror the
 // backend artifacts exactly; helpers never invent values for
 // absent fields.
+// NOTE: workflow ids are duplicated from api.ts (which owns
+// them) because extensionless cross-imports break plain Node;
+// summary.test.mjs asserts both modules agree.
 
 export interface OfflineSummary {
   workflow: string;
@@ -227,4 +230,74 @@ export function numeric(value: number | null | undefined): string {
 /** Render seconds with one decimal place. */
 export function seconds(value: number): string {
   return `${value.toFixed(1)} s`;
+}
+
+export interface PipelineVideoMeta {
+  bytes: number;
+  duration_seconds: number;
+  file_name: string;
+  fps: number;
+  frame_count: number;
+  height: number;
+  sha256: string;
+  width: number;
+}
+
+export interface PipelineExtractionMeta {
+  frame_indices: number[];
+  manifest_sha256: string;
+  sample_fps: number;
+}
+
+export interface PipelineFirstpassMeta {
+  frames_failed: number;
+  frames_observed: number;
+  frames_total: number;
+  model: string;
+  pass_id: string;
+  provider: string;
+  terminal_states: Record<string, number>;
+}
+
+export interface PipelineSummary {
+  workflow: string;
+  run_id: string;
+  source_object_id: string;
+  source_sha256: string;
+  evidence_version: string;
+  inference_performed: boolean;
+  network_accessed: boolean;
+  paid_services_used: boolean;
+  synthetic_inference: boolean;
+  fake_model_id: string;
+  fake_provider_id: string;
+  video: PipelineVideoMeta;
+  extraction: PipelineExtractionMeta;
+  firstpass: PipelineFirstpassMeta;
+  bundle_sha256: string;
+  draft_id: string;
+  measurements: number;
+  actions: number;
+  unresolved: string[];
+  issues: number;
+  artifacts: string[];
+  note: string;
+}
+
+/** True for pipeline summaries carrying synthetic inference. */
+export function isPipelineSummary(
+  value: OfflineSummary | PipelineSummary,
+): value is PipelineSummary {
+  return (
+    (value as PipelineSummary).synthetic_inference === true
+  );
+}
+
+/** Summary artifact per workflow, or null when none is defined. */
+export function summaryArtifactId(workflow: string): string | null {
+  if (workflow === "offline_reconstruct") return "offline_summary.json";
+  if (workflow === "video_pipeline_offline") {
+    return "pipeline_summary.json";
+  }
+  return null;
 }

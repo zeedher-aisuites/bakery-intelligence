@@ -1,0 +1,336 @@
+"""Offline tests for the video_pipeline_offline workflow (M2-06C.4).
+
+Synthetic MJPG videos are generated locally; inference uses the
+deterministic fake client only. Covers worker success,
+determinism, invalid inputs, uncertain and partial
+observations, provenance, recovery, and an API-to-artifacts
+pass. No network, no live models, no paid services.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+import pytest
+
+from bakery_intelligence.api.jobs import (
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    JobService,
+    WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+)
+from bakery_intelligence.api.pipeline import (
+    FIRSTPASS_REPORT_ARTIFACT,
+    PIPELINE_SUMMARY_ARTIFACT,
+    run_pipeline_offline,
+)
+from bakery_intelligence.api.storage import (
+    LocalStorageBackend,
+    sha256_hex,
+)
+from bakery_intelligence.api.store import SqliteJobStore
+from bakery_intelligence.api.worker import run_once
+from bakery_intelligence.inference.fake import (
+    MODEL_ID as FAKE_MODEL_ID,
+    PROVIDER_ID as FAKE_PROVIDER_ID,
+    DeterministicFakeClient,
+)
+from bakery_intelligence.inference.firstpass import InferenceError
+
+
+def _make_video(path: Path, fps: float = 10.0,
+                frame_count: int = 30) -> Path:
+    """Write a synthetic MJPG video; skip when encoding fails."""
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (64, 48))
+    if not writer.isOpened():
+        pytest.skip("MJPG video encoding is unavailable.")
+    for index in range(frame_count):
+        shade = (index * 7) % 256
+        writer.write(np.full((48, 64, 3), shade, dtype=np.uint8))
+    writer.release()
+    return path
+
+
+def _stack(tmp_path: Path):
+    storage = LocalStorageBackend(tmp_path / "storage")
+    store = SqliteJobStore(tmp_path / "jobs.sqlite3")
+    return storage, store, JobService(store)
+
+
+def _submit_video(storage: LocalStorageBackend,
+                  service: JobService, raw: bytes,
+                  object_id: str = "clip.avi"):
+    storage.store_source(object_id, io.BytesIO(raw))
+    return service.submit(WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+                          source_object_id=object_id)
+
+
+def _read_json(storage: LocalStorageBackend, run_id: str,
+               artifact_id: str) -> Any:
+    return json.loads(storage.read_artifact(run_id, artifact_id))
+
+
+def test_worker_completes_pipeline(tmp_path: Path) -> None:
+    storage, store, service = _stack(tmp_path)
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    record = _submit_video(storage, service, raw)
+    assert run_once(store, storage, "worker-1") == record.run_id
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_COMPLETED
+    assert final.source_sha256 == sha256_hex(raw)
+    assert final.artifact_ids == [
+        "action_events.json",
+        "firstpass_report.json",
+        "measurements.json",
+        "pipeline_summary.json",
+        "recipe_draft.json",
+        "validation.json",
+        "weighing_event.json",
+    ]
+    for artifact_id in final.artifact_ids:
+        content = storage.read_artifact(record.run_id, artifact_id)
+        assert final.artifact_sha256[artifact_id] == sha256_hex(
+            content)
+    summary = _read_json(storage, record.run_id,
+                         PIPELINE_SUMMARY_ARTIFACT)
+    assert summary["workflow"] == WORKFLOW_VIDEO_PIPELINE_OFFLINE
+    assert summary["synthetic_inference"] is True
+    assert summary["inference_performed"] is False
+    assert summary["network_accessed"] is False
+    assert summary["paid_services_used"] is False
+    assert summary["fake_model_id"] == FAKE_MODEL_ID
+    assert summary["fake_provider_id"] == FAKE_PROVIDER_ID
+    assert summary["video"]["fps"] == pytest.approx(10.0)
+    assert summary["video"]["frame_count"] == 30
+    assert summary["extraction"]["frame_indices"] == [0, 10, 20]
+    assert summary["firstpass"]["frames_observed"] == 3
+    assert summary["firstpass"]["frames_failed"] == 0
+    assert summary["firstpass"]["model"] == FAKE_MODEL_ID
+    assert summary["measurements"] == 3
+    draft = _read_json(storage, record.run_id, "recipe_draft.json")
+    assert draft["draft_id"] == summary["draft_id"]
+    assert draft["video_id"].startswith("upload_")
+
+
+def test_pipeline_is_deterministic(tmp_path: Path) -> None:
+    storage, store, service = _stack(tmp_path)
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    digest = sha256_hex(raw)
+    first = _submit_video(storage, service, raw, "a.avi")
+    second = _submit_video(storage, service, raw, "b.avi")
+    assert run_once(store, storage, "worker-1") == first.run_id
+    assert run_once(store, storage, "worker-1") == second.run_id
+    assert service.get(first.run_id).status == STATUS_COMPLETED
+    assert service.get(second.run_id).status == STATUS_COMPLETED
+    for artifact_id in ("measurements.json", "validation.json",
+                        "weighing_event.json",
+                        "action_events.json"):
+        assert (storage.read_artifact(first.run_id, artifact_id)
+                == storage.read_artifact(second.run_id, artifact_id))
+    first_fp = _read_json(storage, first.run_id,
+                          "firstpass_report.json")
+    second_fp = _read_json(storage, second.run_id,
+                           "firstpass_report.json")
+    assert first_fp["source_name"] == (
+        f"video_{digest[:16]}_upload_a@1.0fps")
+    assert second_fp["source_name"] == (
+        f"video_{digest[:16]}_upload_b@1.0fps")
+    first_fp["source_name"] = second_fp["source_name"] = "ignored"
+    assert first_fp == second_fp
+    first_draft = _read_json(storage, first.run_id,
+                             "recipe_draft.json")
+    second_draft = _read_json(storage, second.run_id,
+                              "recipe_draft.json")
+    assert first_draft["draft_id"] == second_draft["draft_id"]
+    first_draft["run_id"] = second_draft["run_id"] = "ignored"
+    assert first_draft == second_draft
+    first_summary = _read_json(
+        storage, first.run_id, PIPELINE_SUMMARY_ARTIFACT)
+    second_summary = _read_json(
+        storage, second.run_id, PIPELINE_SUMMARY_ARTIFACT)
+    assert first_summary["source_object_id"] == "a.avi"
+    assert second_summary["source_object_id"] == "b.avi"
+    assert first_summary["source_sha256"] == digest
+    assert second_summary["source_sha256"] == digest
+    assert first_summary["video"]["file_name"] == "upload_a.avi"
+    assert second_summary["video"]["file_name"] == "upload_b.avi"
+    # Bundle fingerprints differ by design: observations embed the
+    # staged source name, so identical bytes under different upload
+    # names hash differently. The evidence content stays identical.
+    assert len(first_summary["bundle_sha256"]) == 64
+    assert len(second_summary["bundle_sha256"]) == 64
+    assert (first_summary["bundle_sha256"]
+            != second_summary["bundle_sha256"])
+    assert (first_summary["extraction"]
+            == second_summary["extraction"])
+    assert first_summary["run_id"] != second_summary["run_id"]
+
+
+def test_worker_fails_on_non_video(tmp_path: Path) -> None:
+    storage, store, service = _stack(tmp_path)
+    record = _submit_video(storage, service, b"\x00" * 4096)
+    assert run_once(store, storage, "worker-1") == record.run_id
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_FAILED
+    assert final.error is not None
+    assert "Cannot open video container" in final.error
+    assert final.artifact_ids == []
+
+
+def test_worker_fails_on_oversized_video(tmp_path: Path) -> None:
+    storage, store, service = _stack(tmp_path)
+    record = _submit_video(storage, service, b"\x01" * (17 * 1024 * 1024))
+    assert run_once(store, storage, "worker-1") == record.run_id
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_FAILED
+    assert final.error is not None
+    assert "limit is 16777216" in final.error
+    assert final.artifact_ids == []
+
+
+def test_uncertain_and_empty_observations(tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    abstain = json.dumps({"scale_readable": False,
+                          "confidence": "high"})
+    fake = DeterministicFakeClient(
+        overrides={10: "", 20: abstain})
+    artifacts = run_pipeline_offline(
+        video_bytes=raw, video_name="clip.avi", run_id="testrun",
+        source_object_id="clip.avi",
+        source_sha256=sha256_hex(raw),
+        work_dir=tmp_path / "work", fake=fake)
+    report = json.loads(artifacts[FIRSTPASS_REPORT_ARTIFACT])
+    assert report["lifecycle"]["terminal_states"] == {
+        "abstained": 1, "empty_output": 1, "valid_prediction": 1}
+    measurements = json.loads(artifacts["measurements.json"])
+    by_frame = {item["frame_index"]: item
+                for item in measurements["measurements"]}
+    assert by_frame[0]["value"] == 120.0
+    assert by_frame[0]["value_source"] == "firstpass"
+    assert by_frame[10]["value"] is None
+    assert by_frame[20]["value"] is None
+    assert artifacts["recipe_draft.json"] is not None
+
+
+def test_partial_transport_failure_is_explicit(
+        tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    fake = DeterministicFakeClient(overrides={
+        10: InferenceError("BAD_REQUEST", "nope")})
+    artifacts = run_pipeline_offline(
+        video_bytes=raw, video_name="clip.avi", run_id="testrun",
+        source_object_id="clip.avi",
+        source_sha256=sha256_hex(raw),
+        work_dir=tmp_path / "work", fake=fake)
+    report = json.loads(artifacts[FIRSTPASS_REPORT_ARTIFACT])
+    assert report["frames_observed"] == 2
+    assert report["frames_failed"] == 1
+    assert report["batches_needing_review"] == 1
+    measurements = json.loads(artifacts["measurements.json"])
+    by_frame = {item["frame_index"]: item
+                for item in measurements["measurements"]}
+    assert by_frame[10]["value"] is None
+    assert by_frame[10]["value_source"] == "none"
+    assert by_frame[10]["value_status"] == "missing"
+
+
+def test_total_inference_failure_fails_explicitly(
+        tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    fake = DeterministicFakeClient(overrides={
+        0: InferenceError("BAD_REQUEST", "nope"),
+        10: InferenceError("BAD_REQUEST", "nope"),
+        20: InferenceError("BAD_REQUEST", "nope"),
+    })
+    with pytest.raises(ValueError, match="no observations"):
+        run_pipeline_offline(
+            video_bytes=raw, video_name="clip.avi",
+            run_id="testrun", source_object_id="clip.avi",
+            source_sha256=sha256_hex(raw),
+            work_dir=tmp_path / "work", fake=fake)
+
+
+def test_provenance_chain(tmp_path: Path) -> None:
+    storage, store, service = _stack(tmp_path)
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    record = _submit_video(storage, service, raw)
+    assert run_once(store, storage, "worker-1") == record.run_id
+    summary = _read_json(storage, record.run_id,
+                         PIPELINE_SUMMARY_ARTIFACT)
+    assert summary["source_sha256"] == sha256_hex(raw)
+    assert summary["video"]["sha256"] == sha256_hex(raw)
+    assert summary["video"]["file_name"] == "upload_clip.avi"
+    assert len(summary["extraction"]["manifest_sha256"]) == 64
+    assert len(summary["bundle_sha256"]) == 64
+    firstpass = _read_json(storage, record.run_id,
+                           FIRSTPASS_REPORT_ARTIFACT)
+    assert firstpass["model"] == FAKE_MODEL_ID
+    assert firstpass["provider"] == FAKE_PROVIDER_ID
+
+
+def test_failed_pipeline_job_is_not_retried(
+        tmp_path: Path) -> None:
+    storage, store, service = _stack(tmp_path)
+    record = _submit_video(storage, service, b"\x00" * 4096)
+    assert run_once(store, storage, "worker-1") == record.run_id
+    assert run_once(store, storage, "worker-1") is None
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_FAILED
+    assert final.attempts == 1
+
+
+def test_crashed_pipeline_job_recovers(tmp_path: Path) -> None:
+    storage, store, service = _stack(tmp_path)
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    record = _submit_video(storage, service, raw)
+    claimed = store.claim_next(
+        "crashed-worker", "2020-01-01T00:00:00+00:00")
+    assert claimed is not None
+    assert run_once(store, storage, "worker-1") == record.run_id
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_COMPLETED
+    assert final.attempts == 2
+
+
+def test_api_end_to_end_pipeline(tmp_path: Path) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from bakery_intelligence.api.app import build_app
+
+    storage = LocalStorageBackend(tmp_path)
+    db_path = tmp_path / "jobs.sqlite3"
+    client = TestClient(build_app(storage=storage, db_path=db_path))
+    store = SqliteJobStore(db_path)
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    response = client.post(
+        "/api/analyses",
+        files={"file": ("clip.avi", raw, "video/avi")},
+        data={"workflow": WORKFLOW_VIDEO_PIPELINE_OFFLINE},
+    )
+    assert response.status_code == 202
+    created = response.json()
+    assert created["workflow"] == WORKFLOW_VIDEO_PIPELINE_OFFLINE
+    assert run_once(store, storage, "worker-1") == created["run_id"]
+    status = client.get(f"/api/analyses/{created['run_id']}")
+    assert status.json()["status"] == "completed"
+    draft = client.get(
+        f"/api/analyses/{created['run_id']}/artifacts/recipe_draft.json")
+    assert draft.status_code == 200
+    assert draft.json()["draft_id"].startswith("draft_upload_")
+    summary = client.get(
+        f"/api/analyses/{created['run_id']}/artifacts/"
+        f"{PIPELINE_SUMMARY_ARTIFACT}")
+    assert summary.status_code == 200
+    assert summary.json()["synthetic_inference"] is True

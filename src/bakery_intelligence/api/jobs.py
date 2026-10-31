@@ -15,7 +15,10 @@ no inference and its summary artifact states exactly that.
 selected by an uploaded manifest and runs the same shared
 reconstruction core (``api.video``); in C.1 it performs no
 inference either, and its summary carries the recorded-source
-provenance.
+provenance. ``video_pipeline_offline`` stages a small uploaded
+video, extracts frames, runs first-pass inference with a
+deterministic fake client, and reconstructs (``api.pipeline``);
+all model outputs are synthetic test vectors labeled as such.
 """
 
 from __future__ import annotations
@@ -37,11 +40,13 @@ WORKFLOW_STORAGE_SMOKE = "storage_smoke"
 SMOKE_RESULT_ARTIFACT = "smoke_result.json"
 WORKFLOW_OFFLINE_RECONSTRUCT = "offline_reconstruct"
 WORKFLOW_VIDEO_RECONSTRUCT = "video_reconstruct"
+WORKFLOW_VIDEO_PIPELINE_OFFLINE = "video_pipeline_offline"
 
 SUPPORTED_WORKFLOWS = (
     WORKFLOW_STORAGE_SMOKE,
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_VIDEO_RECONSTRUCT,
+    WORKFLOW_VIDEO_PIPELINE_OFFLINE,
 )
 
 
