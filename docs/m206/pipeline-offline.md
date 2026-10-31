@@ -37,8 +37,13 @@ Stage transitions record atomically in `pipeline_state.json`
 (`pipeline-workdir/1`): source identity, video metadata,
 extraction fingerprint (sampling, frame list, manifest and
 per-frame hashes, sidecar hash), the effective first-pass
-configuration, and the stage (`extracted`,
-`firstpass_running`, `firstpass_done`).
+configuration including the explicit offline billing
+posture (`billable: false`, S3), and the stage
+(`extracted`, `firstpass_running`, `firstpass_done`).
+A billing mismatch between state and live configuration
+refuses resume with a fingerprint diff; pre-S3 states
+without the field refuse the same way instead of
+resuming onto an unstated billing posture.
 
 A restarted worker verifies the state fingerprint against
 its live inputs and resumes instead of restarting:

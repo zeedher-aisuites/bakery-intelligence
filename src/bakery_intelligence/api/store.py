@@ -212,12 +212,19 @@ class SqliteJobStore:
             return cursor.rowcount == 1
 
     def requeue_stale(self, now_iso: str, stale_before_iso: str,
-                      max_attempts: dict[str, int]) -> list[str]:
+                      max_attempts: dict[str, int],
+                      billable: frozenset[str] | None = None
+                      ) -> list[str]:
         """Recover running jobs whose heartbeat predates the cutoff.
 
         Each stale job is requeued while its attempt count allows
-        another run, else failed explicitly. Returns recovered ids.
+        another run, else failed explicitly. Workflows listed in
+        ``billable`` are never requeued, regardless of any retry
+        budget: they fail explicitly so a future paid execution
+        cannot be replayed automatically after an interruption.
+        Returns recovered ids.
         """
+        refused = billable if billable is not None else frozenset()
         recovered: list[str] = []
         with self._write_lock:
             connection = self._cursor()
@@ -227,6 +234,18 @@ class SqliteJobStore:
                 (STATUS_RUNNING, stale_before_iso),
             ).fetchall()
             for row in rows:
+                if row["workflow"] in refused:
+                    connection.execute(
+                        "UPDATE jobs SET status = ?, error = ?,"
+                        " updated_at = ? WHERE run_id = ?;",
+                        (STATUS_FAILED,
+                         f"Billable workflow {row['workflow']!r}: "
+                         "automatic retry refused after worker "
+                         "interruption; resubmit explicitly to proceed.",
+                         now_iso, row["run_id"]),
+                    )
+                    recovered.append(row["run_id"])
+                    continue
                 allowed = max_attempts.get(row["workflow"], 0)
                 if row["attempts"] <= allowed:
                     connection.execute(

@@ -133,8 +133,15 @@ accounting seeding, unknown-status refusal, torn-tail
 truncation, mid-file corruption refusal, uncertain
 rerun/refuse policies, invalid-policy rejection, missing
 and disagreeing partials refusal, and pre-S1 review
-compatibility. Crash safety beyond tested resume is not
-claimed.
+compatibility, and the S3 billable policy: mistyped and
+unsafe billable configs rejected with zero calls,
+retry-enabled and multi-budget billable configs
+rejected, uncertain rerun rejected for billable runs,
+single submit on transport failure and token limit,
+uncertain-checkpoint refusal under a billable resume,
+explicit offline `billable: false` default, and valid
+billable completion. Crash safety beyond tested resume
+is not claimed.
 
 ## 5. P04 compatibility
 
@@ -189,3 +196,51 @@ Report whether the recorded-replay test ran or skipped.
   costs halt before further spend.
 - Mirrored 006 policy can drift from the frozen experiment;
   the replay test guards shapes, not future 006 edits.
+
+## 8. Paid-execution safety (S3, offline only)
+
+Paid execution is not available: no live provider
+client exists, no billable API workflow is registered,
+and the worker billable registry (`BILLABLE_WORKFLOWS`
+in `src/bakery_intelligence/api/worker.py`) is empty.
+S3 validates the safety policy a future billable
+client must satisfy, using the fake client only.
+
+Billing is an explicit `FirstPassConfig.billable`
+declaration (default `False`), never inferred from
+the client class. A declared-billable run is validated
+before any request is dispatched and rejected
+(`INVALID_CONFIG`) unless it satisfies all three
+single-submit invariants:
+
+- `max_attempts=1`: one logical frame is submitted at
+  most once; transport failures fail the frame
+  explicitly instead of retrying.
+- Exactly one token budget: token-limit exhaustion
+  ends the frame (`exhausted_token_budget`) without
+  escalation to a second paid request.
+- `uncertain_policy='refuse'`: batches dispatched
+  but not durably recorded require explicit operator
+  resolution instead of automatic replay.
+
+The declaration persists in `run_report.json`
+(`billable`), and the offline pipeline fingerprints
+`billable: false` in `pipeline_state.json`, so a
+billing mismatch refuses resume with a fingerprint
+diff. At the job layer, billable workflows are never
+requeued after a worker interruption: stale recovery
+fails them explicitly, regardless of any retry
+budget. S1 request/cost accounting stays cumulative
+across resumes, and unknown costs are still never
+treated as zero; no hard USD ceiling is claimed when
+actual usage is unknown before dispatch.
+
+Not covered: a real provider adapter (S4), paid
+authorization grants (S5), multi-worker ownership
+fencing for a shared work directory, crash windows
+inside a single request, and any contact with a paid
+provider. Retry budgets for the current offline
+workflows are unchanged. Covered by the S3 sections
+of `tests/test_inference_firstpass.py`,
+`tests/test_api_jobs.py`, and
+`tests/test_api_worker.py`.

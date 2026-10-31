@@ -612,6 +612,10 @@ def run_pipeline_offline(
         "max_requests": None,
         "cost_ceiling_usd": None,
         "strict_cost": False,
+        # S3: this pipeline is explicitly offline/free. Billing
+        # posture is fingerprinted: any future billable state
+        # resumed here (or vice versa) refuses with a diff.
+        "billable": False,
         "uncertain_policy": UNCERTAIN_RERUN,
     }
     state = _read_state(work_dir)
@@ -740,6 +744,7 @@ def run_pipeline_offline(
             provider=firstpass_config["provider"],
             batch_size=firstpass_config["batch_size"],
             client_factory=lambda: client,
+            billable=False,
             uncertain_policy=UNCERTAIN_RERUN,
         )).run()
         report_path = (firstpass_dir / "reports"

@@ -139,3 +139,31 @@ def test_worker_heartbeats_during_long_execution(
     final = service.get(record.run_id)
     assert final is not None
     assert final.status == STATUS_COMPLETED
+
+
+def test_worker_billable_stale_job_not_requeued(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage, store, service = _stack(tmp_path)
+    storage.store_source("clip01.mp4", io.BytesIO(b"fake-video"))
+    record = service.submit(
+        WORKFLOW_STORAGE_SMOKE, source_object_id="clip01.mp4")
+    claimed = store.claim_next(
+        "crashed-worker", "2020-01-01T00:00:00+00:00")
+    assert claimed is not None
+    # Test scope only: mark the smoke workflow billable so the
+    # worker-level refusal path is exercised end to end. The
+    # production registry stays empty; paid execution is
+    # unavailable.
+    monkeypatch.setattr(
+        worker_module, "BILLABLE_WORKFLOWS",
+        frozenset({WORKFLOW_STORAGE_SMOKE}))
+    # Recovery refuses the stale billable job, so the pass goes
+    # idle: no requeue, no execution, no second attempt.
+    assert run_once(store, storage, "worker-2") is None
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_FAILED
+    assert final.attempts == 1
+    assert final.artifact_ids == []
+    assert "Billable workflow" in (final.error or "")
+    assert "automatic retry refused" in (final.error or "")

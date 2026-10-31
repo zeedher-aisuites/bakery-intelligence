@@ -11,6 +11,7 @@ from bakery_intelligence.api.jobs import (
     STATUS_FAILED,
     STATUS_QUEUED,
     STATUS_RUNNING,
+    JobRecord,
     JobService,
     UnknownWorkflowError,
     WORKFLOW_STORAGE_SMOKE,
@@ -140,3 +141,27 @@ def test_fail_and_complete_require_ownership(tmp_path: Path) -> None:
     assert service.get(record.run_id).status == STATUS_RUNNING
     assert store.fail(record.run_id, "worker-a", now, "boom") is True
     assert service.get(record.run_id).status == STATUS_FAILED
+
+
+def test_billable_stale_job_fails_without_requeue(
+        tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    store = service.store
+    probe = JobRecord(run_id=new_run_id(), workflow="billable_probe")
+    store.create(probe)
+    claimed = store.claim_next(
+        "worker-a", "2026-01-01T00:00:00+00:00")
+    assert claimed is not None
+    # The retry budget is generous on purpose: the billable
+    # registry overrides it and refuses any automatic requeue.
+    recovered = store.requeue_stale(
+        "2026-06-01T00:00:00+00:00", "2026-02-01T00:00:00+00:00",
+        {"billable_probe": 5},
+        billable=frozenset({"billable_probe"}))
+    assert recovered == [probe.run_id]
+    reread = service.get(probe.run_id)
+    assert reread is not None
+    assert reread.status == STATUS_FAILED
+    assert reread.attempts == 1
+    assert "Billable workflow" in (reread.error or "")
+    assert "automatic retry refused" in (reread.error or "")

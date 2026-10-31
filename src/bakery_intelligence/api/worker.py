@@ -79,6 +79,14 @@ WORKFLOW_MAX_ATTEMPTS = {
     WORKFLOW_VIDEO_PIPELINE_OFFLINE: 2,
 }
 
+# S3: workflows whose execution may bill a provider. Listed
+# workflows are NEVER requeued automatically after a worker
+# interruption, regardless of any retry budget: a stale billable
+# job fails explicitly and requires deliberate operator action to
+# resume or resubmit. Empty until S4/S5 introduce a paid workflow
+# and its authorization grants; paid execution is not available.
+BILLABLE_WORKFLOWS: frozenset[str] = frozenset()
+
 
 def _storage_smoke_artifact(record: JobRecord,
                             source_sha256: str) -> dict[str, Any]:
@@ -197,7 +205,8 @@ def run_once(store: SqliteJobStore, storage: StorageBackend,
 
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(seconds=DEFAULT_STALE_SECONDS)).isoformat()
-    store.requeue_stale(now.isoformat(), cutoff, WORKFLOW_MAX_ATTEMPTS)
+    store.requeue_stale(now.isoformat(), cutoff, WORKFLOW_MAX_ATTEMPTS,
+                        billable=BILLABLE_WORKFLOWS)
     record = store.claim_next(worker_id, now.isoformat())
     if record is None:
         return None

@@ -1401,3 +1401,152 @@ def test_legacy_review_checkpoint_resumes_selectively(
         "reconstructed_from_token_totals")
     assert budget["prior_spent_cost_known_usd_estimate"] == 60.0
     assert budget["prior_frames_observed"] == 2
+
+
+# Paid-execution retry safety (M2-06C.5/S3) -------------------------------
+
+
+def _billable(**extra: Any) -> dict[str, Any]:
+    """Valid billable overrides: single submit, no replay."""
+    payload: dict[str, Any] = {
+        "billable": True, "max_attempts": 1,
+        "token_budgets": (1024,), "uncertain_policy": "refuse",
+    }
+    payload.update(extra)
+    return payload
+
+
+@pytest.mark.parametrize("flag", [1, 0, "yes", None])
+def test_billable_flag_type_rejected(
+        tmp_path: Path, flag: Any) -> None:
+    frames = _seq_frames(tmp_path, 1)
+    fake = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, tmp_path / "run", fake,
+            **_billable(billable=flag))).run()
+    assert caught.value.code == "INVALID_CONFIG"
+    assert "billable must be a bool" in caught.value.message
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("attempts", [0, 2, 4, True, 1.0, "1"])
+def test_billable_rejects_retry_enabled_config(
+        tmp_path: Path, attempts: Any) -> None:
+    frames = _seq_frames(tmp_path, 1)
+    fake = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, tmp_path / "run", fake,
+            **_billable(max_attempts=attempts))).run()
+    assert caught.value.code == "INVALID_CONFIG"
+    assert "max_attempts=1" in caught.value.message
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("budgets", [(1024, 2048), (), None, "1024"])
+def test_billable_rejects_token_escalation_config(
+        tmp_path: Path, budgets: Any) -> None:
+    frames = _seq_frames(tmp_path, 1)
+    fake = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, tmp_path / "run", fake,
+            **_billable(token_budgets=budgets))).run()
+    assert caught.value.code == "INVALID_CONFIG"
+    assert "exactly one token budget" in caught.value.message
+    assert fake.calls == []
+
+
+def test_billable_requires_uncertain_refusal(tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 1)
+    fake = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, tmp_path / "run", fake,
+            **_billable(uncertain_policy="rerun"))).run()
+    assert caught.value.code == "INVALID_CONFIG"
+    assert "uncertain_policy='refuse'" in caught.value.message
+    assert fake.calls == []
+
+
+def test_billable_transport_failure_submits_once(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 2)
+    fake = _FakeClient(
+        script={1: [InferenceError("TIMEOUT", "slow")]},
+        default=_ok())
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        **_billable())).run()
+    assert _call_indices(fake) == [1, 2]
+    assert report["retries"] == 0
+    assert report["frames_observed"] == 1
+    assert report["frames_failed"] == 1
+    assert report["lifecycle"]["terminal_states"] == {
+        "request_failed": 1, "valid_prediction": 1}
+    assert report["batches_needing_review"] == 1
+    assert report["budget"]["stopped_reason"] is None
+
+
+def test_billable_token_limit_does_not_escalate(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 1)
+    incomplete = _ok("", InferenceUsage(5, 5, 10),
+                     status="incomplete",
+                     incomplete_reason="max_output_tokens reached")
+    fake = _FakeClient(script={1: [incomplete]})
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake,
+        **_billable())).run()
+    assert len(fake.calls) == 1
+    assert fake.budgets == [1024]
+    assert report["lifecycle"]["token_retries"] == 0
+    assert report["lifecycle"]["terminal_states"] == {
+        "exhausted_token_budget": 1}
+    assert report["frames_observed"] == 0
+    assert report["frames_failed"] == 1
+
+
+def test_billable_uncertain_checkpoint_refused(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    out_dir = tmp_path / "run"
+    crashing = _CrashingClient(crash_on=3)
+    with pytest.raises(RuntimeError, match="simulated worker"):
+        FirstPassRunner(_config(
+            frames, out_dir, crashing, batch_size=2,
+            **_billable())).run()
+    assert crashing.calls == [1, 2, 3]
+    cautious = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, out_dir, cautious, batch_size=2,
+            **_billable())).run()
+    assert caught.value.code == "UNCERTAIN_REQUESTS"
+    assert cautious.calls == []
+
+
+def test_billable_valid_run_completes(tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 2)
+    fake = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        **_billable())).run()
+    assert len(fake.calls) == 2
+    assert report["frames_observed"] == 2
+    assert report["frames_failed"] == 0
+    assert report["batches_needing_review"] == 0
+    assert report["budget"]["stopped_reason"] is None
+    assert report["billable"] is True
+
+
+def test_offline_default_reports_not_billable(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 1)
+    fake = _FakeClient(default=_ok())
+    config = _config(frames, tmp_path / "run", fake)
+    assert config.billable is False
+    report = FirstPassRunner(config).run()
+    assert report["billable"] is False
+    assert report["frames_observed"] == 1

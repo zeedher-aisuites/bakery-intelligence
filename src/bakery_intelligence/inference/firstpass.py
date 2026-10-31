@@ -256,6 +256,10 @@ class FirstPassConfig:
     max_requests: int | None = None
     cost_ceiling_usd: float | None = None
     strict_cost: bool = False
+    # S3: explicit billing declaration. False keeps the historical
+    # offline/free retry behavior; True opts into fail-closed
+    # single-submit invariants enforced by _validate_billable_config.
+    billable: bool = False
     uncertain_policy: str = "rerun"
     api_key: str = ""
     client_factory: Callable[[], InferenceClient] | None = None
@@ -315,6 +319,47 @@ def _validate_budget_config(config: FirstPassConfig) -> None:
         raise FirstPassError(
             "INVALID_CONFIG",
             "uncertain_policy must be 'rerun' or 'refuse', "
+            f"got {config.uncertain_policy!r}.")
+
+
+def _validate_billable_config(config: FirstPassConfig) -> None:
+    """Enforce fail-closed single-submit invariants for billable runs.
+
+    Billing status is an explicit declaration, never inferred from
+    the client class or any other field. A billable run submits each
+    logical frame at most once: no transport retries, no
+    token-budget escalation, and no uncertain-batch replay. Any
+    ambiguous or unsafe billable configuration is rejected before
+    any request is dispatched.
+    """
+    billable = config.billable
+    if not isinstance(billable, bool):
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "billable must be a bool, "
+            f"got {billable!r}.")
+    if not billable:
+        return
+    attempts = config.max_attempts
+    if (isinstance(attempts, bool)
+            or not isinstance(attempts, int)
+            or attempts != 1):
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "billable execution requires max_attempts=1 "
+            "(single submit, no transport retry), "
+            f"got {attempts!r}.")
+    budgets = config.token_budgets
+    if not isinstance(budgets, (tuple, list)) or len(budgets) != 1:
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "billable execution requires exactly one token budget "
+            f"(no escalation replay), got {budgets!r}.")
+    if config.uncertain_policy != UNCERTAIN_REFUSE:
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "billable execution requires uncertain_policy='refuse' "
+            "(no uncertain replay), "
             f"got {config.uncertain_policy!r}.")
 
 
@@ -1344,6 +1389,7 @@ class FirstPassRunner:
         """Execute all batches with resume; return the run report."""
         cfg = self._config
         _validate_budget_config(cfg)
+        _validate_billable_config(cfg)
         try:
             policy = BudgetPolicy(budgets=tuple(cfg.token_budgets))
         except ValueError as exc:
@@ -1716,6 +1762,7 @@ class FirstPassRunner:
             "model": cfg.model,
             "provider": cfg.provider,
             "pass_id": cfg.pass_id,
+            "billable": cfg.billable,
             "batches_total": stats["batches_total"],
             "batches_completed": stats["batches_completed"],
             "batches_needing_review": stats["needs_review"],
