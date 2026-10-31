@@ -28,11 +28,15 @@ from bakery_intelligence.api.jobs import (
     SMOKE_RESULT_ARTIFACT,
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_STORAGE_SMOKE,
+    WORKFLOW_VIDEO_RECONSTRUCT,
     JobRecord,
     utc_now_iso,
 )
 from bakery_intelligence.api.offline import (
     execute_offline_reconstruct,
+)
+from bakery_intelligence.api.video import (
+    execute_video_reconstruct,
 )
 from bakery_intelligence.api.storage import (
     LocalStorageBackend,
@@ -52,6 +56,11 @@ WORKFLOW_MAX_ATTEMPTS = {
     # read-back verification), so a crashed attempt may be requeued
     # under the same bound as the smoke workflow.
     WORKFLOW_OFFLINE_RECONSTRUCT: 2,
+    # C.1 only: recorded-evidence assembly plus deterministic
+    # reconstruction, idempotent like offline_reconstruct.
+    # Re-evaluate before any paid stage joins this workflow name:
+    # paid operations must never inherit an offline retry budget.
+    WORKFLOW_VIDEO_RECONSTRUCT: 2,
 }
 
 
@@ -132,11 +141,14 @@ def _store_verified(storage: StorageBackend, run_id: str,
 
 
 def run_once(store: SqliteJobStore, storage: StorageBackend,
-             worker_id: str) -> str | None:
+             worker_id: str,
+             evidence_dir: Path | None = None) -> str | None:
     """Claim and execute one job; return its run id or None if idle.
 
     Recovery of stale jobs runs first so a restarted worker picks up
     work orphaned by a crashed predecessor before taking new jobs.
+    ``evidence_dir`` roots recorded-evidence resolution for the
+    video workflow; other workflows ignore it.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -147,12 +159,18 @@ def run_once(store: SqliteJobStore, storage: StorageBackend,
     if record is None:
         return None
     try:
-        executor = _EXECUTORS.get(record.workflow)
-        if executor is None:
+        if (record.workflow != WORKFLOW_VIDEO_RECONSTRUCT
+                and record.workflow not in _EXECUTORS):
             raise ValueError(
                 f"Unsupported workflow: {record.workflow!r}.")
         store.heartbeat(record.run_id, worker_id, utc_now_iso())
-        artifacts = executor(storage, record)
+        if record.workflow == WORKFLOW_VIDEO_RECONSTRUCT:
+            # Video resolution needs the evidence root, so it
+            # dispatches explicitly instead of via _EXECUTORS.
+            artifacts = execute_video_reconstruct(
+                storage, record, evidence_dir)
+        else:
+            artifacts = _EXECUTORS[record.workflow](storage, record)
         digests = _store_verified(storage, record.run_id, artifacts)
         source_sha = _hash_source(storage, record.source_object_id)
         store.complete(record.run_id, worker_id, utc_now_iso(),
@@ -164,12 +182,14 @@ def run_once(store: SqliteJobStore, storage: StorageBackend,
 
 def serve(store: SqliteJobStore, storage: StorageBackend,
           worker_id: str, poll_seconds: float = DEFAULT_POLL_SECONDS,
-          stop: threading.Event | None = None) -> None:
+          stop: threading.Event | None = None,
+          evidence_dir: Path | None = None) -> None:
     """Claim and execute jobs until the stop event is set."""
     stop_event = stop or threading.Event()
     while not stop_event.is_set():
         try:
-            claimed = run_once(store, storage, worker_id)
+            claimed = run_once(store, storage, worker_id,
+                               evidence_dir=evidence_dir)
         except Exception:
             claimed = None
         if claimed is None:
@@ -184,6 +204,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="API storage root (default: ./runs_api).")
     parser.add_argument("--db-path", type=Path, default=None,
                         help="Job database (default: <root>/jobs.sqlite3).")
+    parser.add_argument("--evidence-dir", type=Path, default=None,
+                        help="Recorded-evidence root for video jobs"
+                        " (default: ./data/processed).")
     parser.add_argument("--worker-id", default="worker-1")
     parser.add_argument("--poll-seconds", type=float,
                         default=DEFAULT_POLL_SECONDS)
@@ -196,13 +219,15 @@ def main(argv: list[str] | None = None) -> int:
     db_path = args.db_path or (storage.base_dir / "jobs.sqlite3")
     store = SqliteJobStore(db_path)
     if args.once:
-        run_id = run_once(store, storage, args.worker_id)
+        run_id = run_once(store, storage, args.worker_id,
+                          evidence_dir=args.evidence_dir)
         print(f"worker done: {run_id or 'idle'}")
         return 0
     print(f"worker {args.worker_id} serving {storage.base_dir} ...")
     try:
         serve(store, storage, args.worker_id,
-              poll_seconds=args.poll_seconds)
+              poll_seconds=args.poll_seconds,
+              evidence_dir=args.evidence_dir)
     except KeyboardInterrupt:
         print("worker stopped.")
     return 0

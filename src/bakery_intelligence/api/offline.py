@@ -182,6 +182,38 @@ def _stage_bundle(bundle: OfflineBundle, root: Path) -> dict[str, Any]:
             "units_path": units_path, "exec_dir": exec_dir}
 
 
+def run_bundle_reconstruction(
+        bundle: OfflineBundle,
+        run_dir_name: str) -> tuple[dict[str, Any],
+                                    dict[str, bytes]]:
+    """Stage one validated bundle and run reconstruction on it.
+
+    Shared core for every bundle-shaped workflow: identical inputs
+    always produce identical staged files and identical
+    reconstruction outputs. Returns the reconstruct summary and the
+    output artifacts (without any workflow summary receipt, which
+    each caller builds from its own provenance).
+    """
+    with tempfile.TemporaryDirectory(
+            prefix="bundle_reconstruct_") as staging:
+        root = Path(staging)
+        staged = _stage_bundle(bundle, root)
+        out_dir = root / run_dir_name
+        start, end = bundle.window if bundle.window else (None, None)
+        summary = reconstruct(
+            staged["obs_dir"], staged["temporal_path"],
+            bundle.event_id, out_dir, bundle.video_id,
+            staged["exec_dir"], staged["units_path"], start, end,
+            bundle.draft_version, bundle.source_dataset,
+        )
+        artifacts = {name: (out_dir / name).read_bytes()
+                     for name in _ALWAYS_WRITTEN}
+        if staged["units_path"] is not None:
+            artifacts[UNITS_APPLIED_ARTIFACT] = (
+                out_dir / UNITS_APPLIED_ARTIFACT).read_bytes()
+    return summary, artifacts
+
+
 def execute_offline_reconstruct(
         storage: StorageBackend,
         record: JobRecord) -> dict[str, bytes]:
@@ -200,23 +232,8 @@ def execute_offline_reconstruct(
     with storage.open_source(record.source_object_id) as handle:
         raw = handle.read()
     bundle = parse_offline_bundle(raw)
-    with tempfile.TemporaryDirectory(
-            prefix="offline_reconstruct_") as staging:
-        root = Path(staging)
-        staged = _stage_bundle(bundle, root)
-        out_dir = root / record.run_id
-        start, end = bundle.window if bundle.window else (None, None)
-        summary = reconstruct(
-            staged["obs_dir"], staged["temporal_path"],
-            bundle.event_id, out_dir, bundle.video_id,
-            staged["exec_dir"], staged["units_path"], start, end,
-            bundle.draft_version, bundle.source_dataset,
-        )
-        artifacts = {name: (out_dir / name).read_bytes()
-                     for name in _ALWAYS_WRITTEN}
-        if staged["units_path"] is not None:
-            artifacts[UNITS_APPLIED_ARTIFACT] = (
-                out_dir / UNITS_APPLIED_ARTIFACT).read_bytes()
+    summary, artifacts = run_bundle_reconstruction(
+        bundle, record.run_id)
     payload = {
         "workflow": WORKFLOW_OFFLINE_RECONSTRUCT,
         "run_id": record.run_id,

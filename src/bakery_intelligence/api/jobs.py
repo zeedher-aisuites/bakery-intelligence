@@ -5,12 +5,17 @@ so API restarts never lose execution state. Execution itself belongs
 to the independent worker process (``api.worker``); nothing here runs
 work on HTTP handler threads.
 
-Two workflows are supported. ``storage_smoke`` covers source
+Three workflows are supported. ``storage_smoke`` covers source
 storage plus SHA-256 verification; it performs no video analysis
 and its outputs say so explicitly. ``offline_reconstruct``
 consumes an uploaded bundle of existing analysis artifacts and
 runs deterministic reconstruction (``api.offline``); it performs
 no inference and its summary artifact states exactly that.
+``video_reconstruct`` assembles read-only recorded evidence
+selected by an uploaded manifest and runs the same shared
+reconstruction core (``api.video``); in C.1 it performs no
+inference either, and its summary carries the recorded-source
+provenance.
 """
 
 from __future__ import annotations
@@ -31,10 +36,12 @@ STATUS_FAILED = "failed"
 WORKFLOW_STORAGE_SMOKE = "storage_smoke"
 SMOKE_RESULT_ARTIFACT = "smoke_result.json"
 WORKFLOW_OFFLINE_RECONSTRUCT = "offline_reconstruct"
+WORKFLOW_VIDEO_RECONSTRUCT = "video_reconstruct"
 
 SUPPORTED_WORKFLOWS = (
     WORKFLOW_STORAGE_SMOKE,
     WORKFLOW_OFFLINE_RECONSTRUCT,
+    WORKFLOW_VIDEO_RECONSTRUCT,
 )
 
 
