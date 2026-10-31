@@ -1,0 +1,8 @@
+# Enforce LF for byte-sensitive JSON: tests assert LF bytes
+# (test_file_formatting_lf_two_space_indent) and the preliminary
+# adapter hashes exact source bytes for provenance. CRLF checkout on
+# Windows (core.autocrlf=true) breaks those assertions. Scoped to the
+# affected directories only; all other paths keep default behavior.
+fixtures/synthetic/*.json text eol=lf
+experiments/003_video_to_recipe/annotations/preliminary/*.json text eol=lf
+tests/data/canonical/*.json text eol=lf
