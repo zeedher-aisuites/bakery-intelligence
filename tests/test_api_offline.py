@@ -142,6 +142,7 @@ def test_parse_accepts_minimal_bundle() -> None:
     assert bundle.video_id == VIDEO_ID
     assert bundle.event_id == EVENT_ID
     assert bundle.draft_version == 1
+    assert bundle.source_fps is None
     assert bundle.window is None
     assert bundle.units is None
     assert bundle.execution_reports == []
@@ -155,6 +156,13 @@ def test_parse_accepts_window_and_options() -> None:
     assert bundle.draft_version == 3
     assert bundle.source_dataset == "synthetic"
     assert bundle.window == (148.5, 151.5)
+
+
+def test_parse_accepts_source_fps() -> None:
+    bundle = parse_offline_bundle(_bundle_bytes(source_fps=25.0))
+    assert bundle.source_fps == 25.0
+    integer = parse_offline_bundle(_bundle_bytes(source_fps=25))
+    assert integer.source_fps == 25.0
 
 
 def test_parse_rejects_malformed_json() -> None:
@@ -171,6 +179,12 @@ def test_parse_rejects_structural_problems() -> None:
         "draft_bool": {"draft_version": True},
         "draft_str": {"draft_version": "1"},
         "dataset": {"source_dataset": 7},
+        "fps_zero": {"source_fps": 0},
+        "fps_negative": {"source_fps": -25.0},
+        "fps_nan": {"source_fps": float("nan")},
+        "fps_inf": {"source_fps": float("inf")},
+        "fps_str": {"source_fps": "25"},
+        "fps_bool": {"source_fps": True},
         "window_shape": {"window": "narrow"},
         "window_start": {"window": {"start": "x", "end": 2.0}},
         "observations_empty": {"observations": []},
@@ -269,6 +283,27 @@ def test_worker_offline_applies_units_sidecar(
     resolutions = measurements["unit_resolutions"]
     assert resolutions[0]["unit"] == "g"
     assert resolutions[0]["provenance"] == "human_assigned"
+
+
+def test_worker_offline_uses_bundle_source_fps(
+        tmp_path: Path) -> None:
+    observations = [_obs_record(frame, verbatim)
+                    for frame, verbatim in zip(FRAMES, VERBATIMS)
+                    if frame != 7500]
+    raw = _bundle_bytes(observations=observations,
+                        source_fps=25.0)
+    storage, store, service = _stack(tmp_path)
+    record = _submit_offline(storage, service, raw)
+    assert run_once(store, storage, "worker-1") == record.run_id
+    assert service.get(record.run_id).status == STATUS_COMPLETED
+    measurements = _read_json(
+        storage, record.run_id, "measurements.json")
+    target = [item for item in measurements["measurements"]
+              if item["frame_index"] == 7500][0]
+    assert target["timestamp_seconds"] == pytest.approx(300.0)
+    assert target["original"] is None
+    assert target["value_source"] == "none"
+    assert target["value_status"] == "missing"
 
 
 # Invalid inputs and missing artifacts -------------------------------

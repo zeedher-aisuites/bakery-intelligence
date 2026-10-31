@@ -243,6 +243,27 @@ def test_partial_transport_failure_is_explicit(
     assert by_frame[10]["value_status"] == "missing"
 
 
+def test_pipeline_missing_frame_uses_video_fps(
+        tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    fake = DeterministicFakeClient(overrides={
+        10: InferenceError("BAD_REQUEST", "nope")})
+    artifacts = run_pipeline_offline(
+        video_bytes=raw, video_name="clip.avi", run_id="testrun",
+        source_object_id="clip.avi",
+        source_sha256=sha256_hex(raw),
+        work_dir=tmp_path / "work", fake=fake)
+    measurements = json.loads(artifacts["measurements.json"])
+    by_frame = {item["frame_index"]: item
+                for item in measurements["measurements"]}
+    assert by_frame[10]["timestamp_seconds"] == pytest.approx(1.0)
+    assert by_frame[10]["original"] is None
+    assert by_frame[10]["value_source"] == "none"
+    assert by_frame[10]["value_status"] == "missing"
+    assert by_frame[0]["timestamp_seconds"] == pytest.approx(0.0)
+    assert by_frame[20]["timestamp_seconds"] == pytest.approx(2.0)
+
+
 def test_total_inference_failure_fails_explicitly(
         tmp_path: Path) -> None:
     raw = _make_video(tmp_path / "clip.avi").read_bytes()

@@ -9,6 +9,7 @@ consecutive differences as plain arithmetic, never as quantities.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,13 @@ from bakery_intelligence.verification.numerics import (
     STATUS_OK,
     normalize_number,
 )
+
+
+# Legacy missing-timestamp divisor. Correct only for 50 FPS
+# sources such as the P04/EPIC-KITCHENS recordings; callers
+# with a measured source rate must pass it as ``source_fps``
+# instead of relying on this default.
+LEGACY_FALLBACK_FPS = 50.0
 
 
 class ReconstructionError(Exception):
@@ -26,6 +34,28 @@ class ReconstructionError(Exception):
         self.code = code
         self.message = message
         self.entity_id = entity_id
+
+
+def _fallback_rate(source_fps: float | None) -> float:
+    """Resolve the missing-timestamp fallback divisor.
+
+    ``None`` preserves the legacy 50 FPS fallback for sources
+    whose frame rate is genuinely unknown. Any other value
+    must be a positive finite number; anything else is a
+    caller defect, reported instead of silently substituted.
+    """
+    if source_fps is None:
+        return LEGACY_FALLBACK_FPS
+    if (isinstance(source_fps, bool)
+            or not isinstance(source_fps, (int, float))
+            or not math.isfinite(source_fps)
+            or source_fps <= 0):
+        raise ReconstructionError(
+            "FPS_INVALID",
+            "source_fps must be a positive finite number, "
+            f"got {source_fps!r}.",
+        )
+    return float(source_fps)
 
 
 def load_observations_index(obs_dir: Path) -> dict[int, dict[str, Any]]:
@@ -144,13 +174,20 @@ def assemble_measurements(
         obs_index: dict[int, dict[str, Any]],
         verified: dict[float, dict[str, Any]],
         start: float | None = None,
-        end: float | None = None) -> list[dict[str, Any]]:
+        end: float | None = None,
+        source_fps: float | None = None) -> list[dict[str, Any]]:
     """Build ordered measurements, preferring verified readings.
 
     Optional [start, end] bounds restrict to a sub-window of the
     event without modifying the event definition. Deltas are plain
     consecutive differences, never ingredient quantities.
+
+    Frames without an observation timestamp fall back to
+    ``frame_index / source_fps``; when ``source_fps`` is None
+    the legacy 50 FPS divisor applies. Supplied observation
+    timestamps are never rewritten.
     """
+    rate = _fallback_rate(source_fps)
     frames = sorted(event.get("frame_indices", []))
     measurements = []
     previous_value: float | None = None
@@ -161,7 +198,7 @@ def assemble_measurements(
         if record is not None:
             timestamp = record.get("timestamp_seconds")
         if timestamp is None:
-            timestamp = float(frame) / 50.0
+            timestamp = float(frame) / rate
         if start is not None and timestamp < start:
             continue
         if end is not None and timestamp > end:

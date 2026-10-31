@@ -46,6 +46,7 @@ with its own workflow name embedded.
   "draft_version": 1,
   "source_dataset": null,
   "window": null,
+  "source_fps": null,
   "observations": [
     {"frame_index": 7400, "timestamp_seconds": 148.0,
      "model_fields": {"scale_display_verbatim": "353", "...": "..."}}
@@ -60,9 +61,12 @@ Required: `bundle_format` (exact match), `video_id`,
 `event_id`, non-empty `observations`, `temporal` object.
 Optional: `draft_version` (integer >= 1, default 1),
 `source_dataset` (string or null), `window` (object with
-numeric `start`/`end` or null), `execution_reports` (list of
-report objects, each with an `event_id` string),
-`units` (sidecar object with an `assignments` list or null).
+numeric `start`/`end` or null), `source_fps` (positive
+finite number or null; measured source frame rate used only
+for the missing-observation timestamp fallback, legacy 50
+FPS when null), `execution_reports` (list of report objects,
+each with an `event_id` string), `units` (sidecar object
+with an `assignments` list or null).
 
 Validation is two-layered. The API checks structure and scalar
 types (`OfflineBundleError`); the reconstruction loaders check

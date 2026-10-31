@@ -166,6 +166,7 @@ def run_pipeline_offline(
         "bundle_format": "bakery-offline-bundle/1",
         "video_id": video_id,
         "event_id": event_id,
+        "source_fps": staged.metadata.fps,
         "observations": observations,
         "temporal": temporal,
         "execution_reports": [],

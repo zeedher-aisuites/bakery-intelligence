@@ -54,8 +54,13 @@ def reconstruct(obs_dir: Path, temporal_path: Path, event_id: str,
                 units_path: Path | None = None,
                 start: float | None = None, end: float | None = None,
                 draft_version: int = 1,
-                source_dataset: str | None = None) -> dict[str, Any]:
-    """Run the full deterministic reconstruction for one event."""
+                source_dataset: str | None = None,
+                source_fps: float | None = None) -> dict[str, Any]:
+    """Run the full deterministic reconstruction for one event.
+
+    ``source_fps`` feeds the missing-timestamp fallback; None
+    preserves the legacy 50 FPS divisor.
+    """
     if out_dir.exists():
         raise ReconstructionError(
             "OUTPUT_EXISTS",
@@ -82,7 +87,8 @@ def reconstruct(obs_dir: Path, temporal_path: Path, event_id: str,
     reports = load_execution_reports(exec_dir)
     verified = verified_by_timestamp(reports.get(event_id))
     measurements = assemble_measurements(
-        event, obs_index, verified, start, end)
+        event, obs_index, verified, start, end,
+        source_fps=source_fps)
     if not measurements:
         raise ReconstructionError(
             "NO_MEASUREMENTS",
@@ -167,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--end", type=float, default=None)
     rec.add_argument("--draft-version", type=int, default=1)
     rec.add_argument("--source-dataset", default=None)
+    rec.add_argument("--source-fps", type=float, default=None)
     rec.add_argument("--run-id", default=None)
     assign = sub.add_parser("assign-unit", help="append a unit revision")
     assign.add_argument("--units-file", type=Path, required=True)
@@ -203,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             args.obs_dir, args.temporal, args.event_id,
             args.out / run_id, args.video_id, args.executions,
             args.units, args.start, args.end, args.draft_version,
-            args.source_dataset,
+            args.source_dataset, args.source_fps,
         )
         print(json.dumps(summary, indent=2, sort_keys=True))
         state_path = args.out / run_id / "validation.json"

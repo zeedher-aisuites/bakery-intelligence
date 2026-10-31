@@ -303,3 +303,140 @@ def test_deltas_are_not_quantities(tmp_path: Path) -> None:
                         / "recipe_draft.json").read_text(
                             encoding="utf-8"))
     assert draft["ingredients"] == []
+
+
+# FPS-aware missing-timestamp fallback (M2-06C.5/S0) -----------------
+
+
+def _fallback_event(frames: tuple[int, ...] = (100, 200)
+                    ) -> dict[str, Any]:
+    return {
+        "event_id": "fallback_test",
+        "candidate_type": "scale_visibility",
+        "start_timestamp_seconds": 0.0,
+        "end_timestamp_seconds": 10.0,
+        "verification_status": "candidate",
+        "frame_indices": list(frames),
+        "review_reasons": [],
+        "uncertainty_notes": [],
+    }
+
+
+def _measurement_by_frame(tmp_path: Path, run_id: str,
+                          frame: int) -> dict[str, Any]:
+    bundle = json.loads((tmp_path / "recon" / run_id
+                         / "measurements.json").read_text(
+                             encoding="utf-8"))
+    return [item for item in bundle["measurements"]
+            if item["frame_index"] == frame][0]
+
+
+def test_missing_observation_uses_source_fps() -> None:
+    measurements = assemble_measurements(
+        _fallback_event(), {}, {}, source_fps=25.0)
+    by_frame = {item["frame_index"]: item
+                for item in measurements}
+    assert by_frame[100]["timestamp_seconds"] == pytest.approx(4.0)
+    assert by_frame[200]["timestamp_seconds"] == pytest.approx(8.0)
+    for item in measurements:
+        assert item["original"] is None
+        assert item["value"] is None
+        assert item["value_source"] == "none"
+        assert item["value_status"] == "missing"
+
+
+def test_missing_observation_legacy_fallback_without_fps(
+        ) -> None:
+    measurements = assemble_measurements(_fallback_event(), {}, {})
+    by_frame = {item["frame_index"]: item
+                for item in measurements}
+    assert by_frame[100]["timestamp_seconds"] == pytest.approx(2.0)
+    assert by_frame[200]["timestamp_seconds"] == pytest.approx(4.0)
+    for item in measurements:
+        assert item["value_source"] == "none"
+        assert item["value_status"] == "missing"
+
+
+def test_source_fps_accepts_integer_rates() -> None:
+    measurements = assemble_measurements(
+        _fallback_event((100,)), {}, {}, source_fps=25)
+    assert measurements[0]["timestamp_seconds"] == pytest.approx(4.0)
+
+
+def test_valid_observation_timestamp_preserved_with_source_fps(
+        ) -> None:
+    record = _obs_record(100, "353")
+    record["timestamp_seconds"] = 148.0
+    measurements = assemble_measurements(
+        _fallback_event((100,)), {100: record}, {},
+        source_fps=25.0)
+    assert len(measurements) == 1
+    assert measurements[0]["timestamp_seconds"] == 148.0
+    assert measurements[0]["value"] == 353.0
+    assert measurements[0]["value_source"] == "firstpass"
+
+
+@pytest.mark.parametrize("bad_fps", [
+    0, 0.0, -25.0, float("nan"), float("inf"),
+    float("-inf"), "25", True, [25.0],
+])
+def test_invalid_source_fps_rejected(bad_fps: Any) -> None:
+    with pytest.raises(ReconstructionError) as exc_info:
+        assemble_measurements(
+            _fallback_event(), {}, {}, source_fps=bad_fps)
+    assert exc_info.value.code == "FPS_INVALID"
+
+
+def test_fallback_timestamp_window_filtering() -> None:
+    # Frame 100 lands at 4.0 s under 25 FPS but at 2.0 s
+    # under the legacy 50 FPS divisor.
+    included = assemble_measurements(
+        _fallback_event((100,)), {}, {}, start=3.0, end=5.0,
+        source_fps=25.0)
+    assert [item["timestamp_seconds"] for item in included] == [4.0]
+    excluded = assemble_measurements(
+        _fallback_event((100,)), {}, {}, start=3.0, end=5.0)
+    assert excluded == []
+
+
+def test_verified_lookup_matches_fallback_timestamp() -> None:
+    verified = {4.0: {
+        "display_text": "120", "numeric_value": 120.0,
+        "readable": True, "confidence": "high",
+        "uncertainty_notes": None,
+    }}
+    measurements = assemble_measurements(
+        _fallback_event((100,)), {}, verified, source_fps=25.0)
+    assert measurements[0]["timestamp_seconds"] == pytest.approx(4.0)
+    assert measurements[0]["value_source"] == "verification"
+    assert measurements[0]["value"] == 120.0
+    legacy = assemble_measurements(
+        _fallback_event((100,)), {}, verified)
+    assert legacy[0]["value_source"] == "none"
+    assert legacy[0]["value"] is None
+
+
+def test_reconstruct_source_fps_flag(tmp_path: Path) -> None:
+    paths = _write_inputs(tmp_path)
+    batch_path = paths["obs"] / "batch_test.json"
+    records = json.loads(batch_path.read_text(encoding="utf-8"))
+    kept = [record for record in records
+            if record["frame_index"] != 7500]
+    assert len(kept) == len(records) - 1
+    batch_path.write_text(json.dumps(kept), encoding="utf-8")
+    args = ["reconstruct", "--obs-dir", str(paths["obs"]),
+            "--temporal", str(paths["temporal"]),
+            "--event-id", EVENT_ID,
+            "--out", str(tmp_path / "recon")]
+    assert recon_cli.main([*args, "--run-id", "legacy"]) == 0
+    assert recon_cli.main(
+        [*args, "--run-id", "fps25",
+         "--source-fps", "25.0"]) == 0
+    legacy = _measurement_by_frame(tmp_path, "legacy", 7500)
+    assert legacy["timestamp_seconds"] == pytest.approx(150.0)
+    assert legacy["value_source"] == "none"
+    assert legacy["original"] is None
+    fps25 = _measurement_by_frame(tmp_path, "fps25", 7500)
+    assert fps25["timestamp_seconds"] == pytest.approx(300.0)
+    assert fps25["value_source"] == "none"
+    assert fps25["original"] is None

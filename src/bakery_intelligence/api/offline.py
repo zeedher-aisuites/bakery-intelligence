@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,7 @@ class OfflineBundle:
     event_id: str
     draft_version: int
     source_dataset: str | None
+    source_fps: float | None
     window: tuple[float, float] | None
     observations: list[dict[str, Any]]
     temporal: dict[str, Any]
@@ -110,6 +112,15 @@ def parse_offline_bundle(data: bytes) -> OfflineBundle:
             source_dataset, str):
         raise OfflineBundleError(
             "Bundle source_dataset must be a string or null.")
+    source_fps = payload.get("source_fps")
+    if source_fps is not None:
+        if (not _is_number(source_fps)
+                or not math.isfinite(source_fps)
+                or source_fps <= 0):
+            raise OfflineBundleError(
+                "Bundle source_fps must be a positive finite "
+                "number or null.")
+        source_fps = float(source_fps)
     window: tuple[float, float] | None = None
     raw_window = payload.get("window")
     if raw_window is not None:
@@ -147,6 +158,7 @@ def parse_offline_bundle(data: bytes) -> OfflineBundle:
     return OfflineBundle(
         video_id=video_id, event_id=event_id,
         draft_version=draft_version, source_dataset=source_dataset,
+        source_fps=source_fps,
         window=window, observations=observations, temporal=temporal,
         execution_reports=reports, units=units,
         bundle_sha256=hashlib.sha256(data).hexdigest(),
@@ -205,6 +217,7 @@ def run_bundle_reconstruction(
             bundle.event_id, out_dir, bundle.video_id,
             staged["exec_dir"], staged["units_path"], start, end,
             bundle.draft_version, bundle.source_dataset,
+            bundle.source_fps,
         )
         artifacts = {name: (out_dir / name).read_bytes()
                      for name in _ALWAYS_WRITTEN}
