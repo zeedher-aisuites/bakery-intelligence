@@ -453,6 +453,37 @@ def test_billable_factory_rejects_bad_budget(
     assert caught.value.code == "INVALID_CONFIG"
 
 
+def test_billable_factory_passes_pass_and_batch(
+        tmp_path: Path) -> None:
+    config = billable_runner_config(
+        frames=[], source=SOURCE, out_dir=tmp_path,
+        prompt_text=PROMPT,
+        client_factory=lambda: MetaSparkClient(
+            client_factory=lambda key, timeout: _FakeSDK([])),
+        pass_id="pipeline_firstpass", batch_size=5)
+    assert config.pass_id == "pipeline_firstpass"
+    assert config.batch_size == 5
+    assert config.billable is True
+    assert config.max_attempts == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pass_id", ""), ("pass_id", None), ("pass_id", 7),
+    ("batch_size", 0), ("batch_size", -2),
+    ("batch_size", True), ("batch_size", "5"),
+])
+def test_billable_factory_rejects_bad_pass_or_batch(
+        tmp_path: Path, field: str, value: Any) -> None:
+    with pytest.raises(FirstPassError) as caught:
+        billable_runner_config(
+            frames=[], source=SOURCE, out_dir=tmp_path,
+            prompt_text=PROMPT,
+            client_factory=lambda: MetaSparkClient(
+                client_factory=lambda key, timeout: _FakeSDK([])),
+            **{field: value})
+    assert caught.value.code == "INVALID_CONFIG"
+
+
 def test_adapter_runs_offline_end_to_end(tmp_path: Path) -> None:
     image = _image(tmp_path / "frames" / "frame_00000001.jpg")
     frames = [FrameRef(frame_index=1, image_path=image,

@@ -38,12 +38,17 @@ Stage transitions record atomically in `pipeline_state.json`
 extraction fingerprint (sampling, frame list, manifest and
 per-frame hashes, sidecar hash), the effective first-pass
 configuration including the explicit offline billing
-posture (`billable: false`, S3), and the stage
+posture (`billable: false`, S3), the transport attempt
+bound (`max_attempts`, S4-B), and the stage
 (`extracted`, `firstpass_running`, `firstpass_done`).
-A billing mismatch between state and live configuration
-refuses resume with a fingerprint diff; pre-S3 states
-without the field refuse the same way instead of
-resuming onto an unstated billing posture.
+A billing or policy mismatch between state and live
+configuration refuses resume with a fingerprint diff;
+pre-S4-B states without the attempt bound refuse the
+same way instead of resuming onto an unstated
+execution policy. An explicit caller-supplied
+billable client seam exists for offline Meta-backed
+testing; no registered workflow supplies it (see
+`docs/m206/meta-spark-adapter.md`).
 
 A restarted worker verifies the state fingerprint against
 its live inputs and resumes instead of restarting:

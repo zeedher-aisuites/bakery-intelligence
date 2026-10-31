@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from bakery_intelligence.inference.firstpass import (
+    DEFAULT_BATCH_SIZE,
     FirstPassConfig,
     FirstPassError,
     FrameRef,
@@ -296,6 +297,8 @@ def billable_runner_config(
     model: str = MODEL_SPARK,
     token_budget: int = 1024,
     api_key: str = "",
+    pass_id: str = "firstpass",
+    batch_size: int = DEFAULT_BATCH_SIZE,
     rates_usd_per_m: tuple[float, float] | None = None,
     cost_ceiling_usd: float | None = None,
     strict_cost: bool = False,
@@ -314,6 +317,18 @@ def billable_runner_config(
             "INVALID_CONFIG",
             "token_budget must be a positive int, "
             f"got {token_budget!r}.")
+    if not isinstance(pass_id, str) or not pass_id:
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "pass_id must be a non-empty str, "
+            f"got {pass_id!r}.")
+    if (isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
+            or batch_size < 1):
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "batch_size must be a positive int, "
+            f"got {batch_size!r}.")
     return FirstPassConfig(
         frames=frames,
         source=source,
@@ -321,6 +336,8 @@ def billable_runner_config(
         model=model,
         prompt_text=prompt_text,
         provider="meta",
+        pass_id=pass_id,
+        batch_size=batch_size,
         token_budgets=(token_budget,),
         max_attempts=1,
         billable=True,

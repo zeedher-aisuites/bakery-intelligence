@@ -135,3 +135,59 @@ git diff --check
 Expected: all new adapter tests pass with zero
 network access, the full suite passes, and all 9
 contract schemas still match.
+
+## 6. Pipeline integration (S4-B, offline only)
+
+`run_pipeline_offline` accepts an explicit
+caller-supplied `billable_client` (S4-B:
+MetaSparkClient with a test-double SDK only). The
+seam runs the runner through `billable_runner_config`
+with the pipeline pass id, batch size, and a single
+caller-chosen token budget, so S3 single-submit
+invariants hold structurally. At most one client
+override (`fake` or `billable_client`) is allowed;
+no registered workflow supplies the seam, and the
+default fake path is behaviorally unchanged.
+
+The durable fingerprint distinguishes the full
+execution policy: provider, model, pass id, batch
+size, token budgets, prompt hash, request/cost
+guards, `max_attempts`, `billable`, and
+`uncertain_policy`. Cross-path resume (fake state
+under a billable client or vice versa) refuses with
+a fingerprint diff, as do pre-S4-B states without
+the `max_attempts` entry. The summary keeps its
+shape and flags (`synthetic_inference: true`, no
+model queried, no network, no paid services — all
+true while only test doubles run here); identity
+keys carry the actual client values and the note
+states the caller-supplied test-double posture.
+
+Verified through `tests/test_pipeline_meta.py`
+(fake SDK exclusively): end-to-end artifacts with
+usage totals, provenance, timestamps, and
+request-id linkage; custom budget plumbing;
+ambiguous-client and bad-budget rejection before
+any state write; exact fingerprint contents;
+cross-path refusal both directions; uncertain
+post-crash refusal with zero new submits;
+certain-failure preservation without replay (a
+completed first pass reuses its verified outputs,
+so failed frames stay explicitly failed);
+unknown-cost accounting without fabrication; and
+a registry-enumerating safety test proving no
+registered workflow can trigger MetaSparkClient.
+
+Remaining blockers for first authorized live
+inference: S5 authorization grants and key
+provisioning; a registered billable workflow plus
+worker registry entry; operator rates and cost
+ceiling; U1–U10 confirmation against current
+provider behavior; an explicit authorized retry
+mechanism for certainly-failed frames (none
+exists; resume never re-dispatches them);
+summary-flag and identity-key contract revision
+for live runs (the S4-B flags assert
+synthetic/test-double execution and must become
+transport-aware); and frontend handling for
+billable summaries.

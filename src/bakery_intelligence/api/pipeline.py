@@ -14,6 +14,13 @@ A restarted worker verifies the state fingerprint and resumes
 instead of restarting: extraction outputs are verified, the
 first-pass runner resumes from its own checkpoints (skipping
 completed requests), and reconstruction re-runs deterministically.
+
+Billable seam (S4-B): ``run_pipeline_offline`` accepts an
+explicit caller-supplied billable-capable client, executed
+under S3 single-submit invariants with provider, model, and
+execution policy fingerprinted. No registered workflow
+supplies the seam; S4-B exercises it with test-double SDKs
+only, so no provider is contacted.
 """
 
 from __future__ import annotations
@@ -41,12 +48,17 @@ from bakery_intelligence.inference.fake import (
 )
 from bakery_intelligence.inference.firstpass import (
     DEFAULT_BUDGETS,
+    DEFAULT_MAX_ATTEMPTS,
+    UNCERTAIN_REFUSE,
     UNCERTAIN_RERUN,
     FirstPassConfig,
     FirstPassRunner,
     FrameRef,
     SourceRef,
     prompt_hash,
+)
+from bakery_intelligence.inference.meta_spark import (
+    billable_runner_config,
 )
 from bakery_intelligence.video.extract import (
     MANIFEST_NAME,
@@ -74,6 +86,12 @@ PIPELINE_SAMPLE_FPS = 1.0
 PIPELINE_BATCH_SIZE = 5
 PIPELINE_MAX_VIDEO_BYTES = 16 * 1024 * 1024
 PIPELINE_MAX_FRAMES = 1000
+
+# Provider label for the caller-supplied billable path (S4-B).
+# Only the deterministic fake runs through registered
+# workflows; the billable seam takes effect solely when a
+# caller explicitly injects a client instance.
+META_PROVIDER_ID = "meta"
 
 TEMPORAL_STUB_REASON = "pipeline_synthetic_stub"
 
@@ -574,18 +592,27 @@ def run_pipeline_offline(
     fake: InferenceClient | None = None,
     sample_fps: float = PIPELINE_SAMPLE_FPS,
     max_frames: int = PIPELINE_MAX_FRAMES,
+    billable_client: InferenceClient | None = None,
+    billable_token_budget: int = 1024,
 ) -> dict[str, bytes]:
     """Run all pipeline stages; return id -> bytes artifacts.
 
     Orchestration over caller-provided bytes and directory:
-    stage, extract, infer (fake), transform, reconstruct.
-    The work directory is durable and run-scoped: a fresh
-    directory runs every stage, while a directory holding a
-    verified state file resumes instead of restarting (see
-    the module docstring). Raises VideoError for
-    intake/extraction failures, PipelineResumeError for
-    incompatible prior state, and ValueError when inference
-    yields no usable observations.
+    stage, extract, infer, transform, reconstruct. Inference
+    uses the deterministic fake unless ``billable_client``
+    supplies an explicit billable-capable client (S4-B:
+    MetaSparkClient with a test-double SDK only), which
+    runs under S3 single-submit invariants via
+    ``billable_runner_config``. At most one client override
+    may be given. No registered workflow supplies the
+    billable seam. The work directory is durable and
+    run-scoped: a fresh directory runs every stage, while a
+    directory holding a verified state file resumes instead
+    of restarting (see the module docstring). Raises
+    VideoError for intake/extraction failures,
+    PipelineResumeError for incompatible prior state, and
+    ValueError when inference yields no usable
+    observations.
     """
     if len(video_bytes) > PIPELINE_MAX_VIDEO_BYTES:
         raise VideoError(
@@ -599,24 +626,45 @@ def run_pipeline_offline(
         raise ValueError(
             f"Pipeline source bytes do not match declared "
             f"sha256 for {video_name!r}.")
-    client: InferenceClient = fake or DeterministicFakeClient()
+    meta_backed = billable_client is not None
+    if meta_backed and fake is not None:
+        raise ValueError(
+            "Pipeline accepts at most one inference client "
+            "override (fake or billable_client).")
+    if meta_backed and (
+            isinstance(billable_token_budget, bool)
+            or not isinstance(billable_token_budget, int)
+            or billable_token_budget <= 0):
+        raise ValueError(
+            "billable_token_budget must be a positive int, "
+            f"got {billable_token_budget!r}.")
+    client: InferenceClient = (
+        billable_client if meta_backed
+        else fake or DeterministicFakeClient())
+    provider_id = META_PROVIDER_ID if meta_backed else FAKE_PROVIDER_ID
     staged_name, sidecar_name = _staged_names(
         video_name, actual_sha)
     firstpass_config = {
         "model": client_model_id(client),
-        "provider": FAKE_PROVIDER_ID,
+        "provider": provider_id,
         "pass_id": PIPELINE_PASS_ID,
         "batch_size": PIPELINE_BATCH_SIZE,
-        "token_budgets": list(DEFAULT_BUDGETS),
+        "token_budgets": (
+            [billable_token_budget] if meta_backed
+            else list(DEFAULT_BUDGETS)),
         "prompt_sha256": prompt_hash(PIPELINE_PROMPT),
         "max_requests": None,
         "cost_ceiling_usd": None,
         "strict_cost": False,
-        # S3: this pipeline is explicitly offline/free. Billing
-        # posture is fingerprinted: any future billable state
-        # resumed here (or vice versa) refuses with a diff.
-        "billable": False,
-        "uncertain_policy": UNCERTAIN_RERUN,
+        # S3/S4-B: billing posture and execution policy are
+        # fingerprinted. Any mismatch (provider, model,
+        # budgets, attempts, billing, uncertain policy)
+        # refuses resume with a diff instead of resuming
+        # onto a different execution policy.
+        "max_attempts": 1 if meta_backed else DEFAULT_MAX_ATTEMPTS,
+        "billable": meta_backed,
+        "uncertain_policy": (
+            UNCERTAIN_REFUSE if meta_backed else UNCERTAIN_RERUN),
     }
     state = _read_state(work_dir)
     resumed = state is not None
@@ -735,18 +783,31 @@ def run_pipeline_offline(
     else:
         state["stage"] = STAGE_FIRSTPASS_RUNNING
         _write_state_atomic(work_dir, state)
-        firstpass_report = FirstPassRunner(FirstPassConfig(
-            frames=frame_refs, source=source_ref,
-            out_dir=firstpass_dir,
-            model=firstpass_config["model"],
-            prompt_text=PIPELINE_PROMPT,
-            pass_id=firstpass_config["pass_id"],
-            provider=firstpass_config["provider"],
-            batch_size=firstpass_config["batch_size"],
-            client_factory=lambda: client,
-            billable=False,
-            uncertain_policy=UNCERTAIN_RERUN,
-        )).run()
+        if meta_backed:
+            runner_config = billable_runner_config(
+                frames=frame_refs, source=source_ref,
+                out_dir=firstpass_dir,
+                prompt_text=PIPELINE_PROMPT,
+                client_factory=lambda: client,
+                model=firstpass_config["model"],
+                token_budget=billable_token_budget,
+                pass_id=firstpass_config["pass_id"],
+                batch_size=firstpass_config["batch_size"],
+            )
+        else:
+            runner_config = FirstPassConfig(
+                frames=frame_refs, source=source_ref,
+                out_dir=firstpass_dir,
+                model=firstpass_config["model"],
+                prompt_text=PIPELINE_PROMPT,
+                pass_id=firstpass_config["pass_id"],
+                provider=firstpass_config["provider"],
+                batch_size=firstpass_config["batch_size"],
+                client_factory=lambda: client,
+                billable=False,
+                uncertain_policy=UNCERTAIN_RERUN,
+            )
+        firstpass_report = FirstPassRunner(runner_config).run()
         report_path = (firstpass_dir / "reports"
                        / "run_report.json")
         try:
@@ -790,6 +851,19 @@ def run_pipeline_offline(
     firstpass_report_raw = (
         firstpass_dir / "reports" / "run_report.json").read_bytes()
     manifest_sha = _sha256_bytes(manifest_bytes)
+    if meta_backed:
+        note = ("Meta-backed pipeline run with a caller-supplied "
+                "client under single-submit billable policy. S4-B "
+                "supports test-double SDKs only: no provider was "
+                "contacted, all readings are synthetic, and the "
+                "draft requires human review before operational "
+                "use.")
+    else:
+        note = ("Offline pipeline run over a staged upload with "
+                "deterministic fake inference. No model was "
+                "queried; all readings are synthetic test vectors "
+                "and the draft requires human review before "
+                "operational use.")
     payload = {
         "workflow": WORKFLOW_VIDEO_PIPELINE_OFFLINE,
         "run_id": run_id,
@@ -802,7 +876,7 @@ def run_pipeline_offline(
         "paid_services_used": False,
         "synthetic_inference": True,
         "fake_model_id": client_model_id(client),
-        "fake_provider_id": FAKE_PROVIDER_ID,
+        "fake_provider_id": provider_id,
         "video": video_meta,
         "extraction": {
             "sample_fps": sample_fps,
@@ -811,7 +885,7 @@ def run_pipeline_offline(
         },
         "firstpass": {
             "model": client_model_id(client),
-            "provider": FAKE_PROVIDER_ID,
+            "provider": provider_id,
             "pass_id": PIPELINE_PASS_ID,
             "frames_total": len(indices),
             "frames_observed": lifetime["observed"],
@@ -826,11 +900,7 @@ def run_pipeline_offline(
         "issues": summary["issues"],
         "artifacts": sorted([*artifacts, PIPELINE_SUMMARY_ARTIFACT,
                              FIRSTPASS_REPORT_ARTIFACT]),
-        "note": ("Offline pipeline run over a staged upload with "
-                 "deterministic fake inference. No model was "
-                 "queried; all readings are synthetic test vectors "
-                 "and the draft requires human review before "
-                 "operational use."),
+        "note": note,
     }
     artifacts[PIPELINE_SUMMARY_ARTIFACT] = (
         json.dumps(payload, indent=2, sort_keys=True) + "\n"
