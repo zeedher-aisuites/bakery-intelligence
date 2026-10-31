@@ -33,6 +33,7 @@ from bakery_intelligence.api.jobs import (
     SMOKE_RESULT_ARTIFACT,
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_STORAGE_SMOKE,
+    WORKFLOW_VIDEO_PIPELINE_META,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
     WORKFLOW_VIDEO_RECONSTRUCT,
     JobRecord,
@@ -42,6 +43,7 @@ from bakery_intelligence.api.offline import (
     execute_offline_reconstruct,
 )
 from bakery_intelligence.api.pipeline import (
+    execute_video_pipeline_meta,
     execute_video_pipeline_offline,
 )
 from bakery_intelligence.api.video import (
@@ -79,13 +81,14 @@ WORKFLOW_MAX_ATTEMPTS = {
     WORKFLOW_VIDEO_PIPELINE_OFFLINE: 2,
 }
 
-# S3: workflows whose execution may bill a provider. Listed
-# workflows are NEVER requeued automatically after a worker
-# interruption, regardless of any retry budget: a stale billable
-# job fails explicitly and requires deliberate operator action to
-# resume or resubmit. Empty until S4/S5 introduce a paid workflow
-# and its authorization grants; paid execution is not available.
-BILLABLE_WORKFLOWS: frozenset[str] = frozenset()
+# S3/S5-A: workflows whose execution may bill a provider.
+# Listed workflows are NEVER requeued automatically after a
+# worker interruption, regardless of any retry budget: a stale
+# billable job fails explicitly and requires deliberate
+# operator action to resume or resubmit.
+BILLABLE_WORKFLOWS: frozenset[str] = frozenset({
+    WORKFLOW_VIDEO_PIPELINE_META,
+})
 
 
 def _storage_smoke_artifact(record: JobRecord,
@@ -125,6 +128,7 @@ _EXECUTORS = {
     WORKFLOW_STORAGE_SMOKE: execute_storage_smoke,
     WORKFLOW_OFFLINE_RECONSTRUCT: execute_offline_reconstruct,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE: execute_video_pipeline_offline,
+    WORKFLOW_VIDEO_PIPELINE_META: execute_video_pipeline_meta,
 }
 
 

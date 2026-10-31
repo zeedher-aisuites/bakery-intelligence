@@ -261,7 +261,10 @@ class FirstPassConfig:
     # single-submit invariants enforced by _validate_billable_config.
     billable: bool = False
     uncertain_policy: str = "rerun"
-    api_key: str = ""
+    # Memory-only credential: excluded from repr so a leaked
+    # debug print can never carry key material. Never recorded
+    # in reports, checkpoints, or observations.
+    api_key: str = field(default="", repr=False)
     client_factory: Callable[[], InferenceClient] | None = None
     sleeper: Callable[[float], None] = time.sleep
 

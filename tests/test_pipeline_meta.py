@@ -21,12 +21,18 @@ import numpy as np
 import pytest
 
 from bakery_intelligence.api import video as video_api
+from bakery_intelligence.api.authorization import (
+    GRANT_FORMAT,
+    confirmation_sentence,
+)
 from bakery_intelligence.api.jobs import (
     STATUS_COMPLETED,
+    STATUS_FAILED,
     SUPPORTED_WORKFLOWS,
     JobService,
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_STORAGE_SMOKE,
+    WORKFLOW_VIDEO_PIPELINE_META,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
     WORKFLOW_VIDEO_RECONSTRUCT,
 )
@@ -360,6 +366,7 @@ def test_meta_fingerprint_records_policy(tmp_path: Path) -> None:
         "prompt_sha256": prompt_hash(PIPELINE_PROMPT),
         "max_requests": None,
         "cost_ceiling_usd": None,
+        "rates_usd_per_m": None,
         "strict_cost": False,
         "max_attempts": 1,
         "billable": True,
@@ -514,6 +521,25 @@ def test_meta_unknown_cost_never_zero(tmp_path: Path) -> None:
     assert len(measurements["measurements"]) == 3
 
 
+def _meta_grant() -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "grant_format": GRANT_FORMAT,
+        "workflow": WORKFLOW_VIDEO_PIPELINE_META,
+        "provider": "meta",
+        "model": MODEL_SPARK,
+        "max_requests": 10,
+        "token_budget": 1024,
+        "max_frames": 100,
+        "operator": "tester",
+        "created_at": "2026-10-31T12:00:00+00:00",
+    }
+    payload["confirmation"] = confirmation_sentence(
+        payload["workflow"], payload["model"],
+        payload["max_requests"], payload["token_budget"],
+        payload["max_frames"], payload["operator"])
+    return payload
+
+
 def test_registered_workflows_cannot_trigger_meta(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def explode(*args: Any, **kwargs: Any) -> Any:
@@ -525,6 +551,11 @@ def test_registered_workflows_cannot_trigger_meta(
     monkeypatch.setattr(MetaSparkClient, "submit", explode)
     monkeypatch.setitem(video_api.EVIDENCE_SETS, SYNTH_SET,
                         _SYNTH_SPEC)
+    # Deterministic even on hosts with real keys exported:
+    # the meta case must fail for missing credentials, never
+    # reach the rigged client.
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    monkeypatch.delenv("MODEL_API_KEY", raising=False)
     storage, store, service = _stack(tmp_path)
     evroot = _evidence_root(tmp_path)
     video_raw = _make_video(tmp_path / "clip.avi").read_bytes()
@@ -552,14 +583,30 @@ def test_registered_workflows_cannot_trigger_meta(
         return service.submit(WORKFLOW_VIDEO_PIPELINE_OFFLINE,
                               source_object_id="clip.avi")
 
+    def submit_meta() -> Any:
+        storage.store_source("meta.avi", io.BytesIO(video_raw))
+        return service.submit(WORKFLOW_VIDEO_PIPELINE_META,
+                              source_object_id="meta.avi",
+                              grant=_meta_grant())
+
     cases = {
-        WORKFLOW_STORAGE_SMOKE: submit_smoke,
-        WORKFLOW_OFFLINE_RECONSTRUCT: submit_offline,
-        WORKFLOW_VIDEO_RECONSTRUCT: submit_video,
-        WORKFLOW_VIDEO_PIPELINE_OFFLINE: submit_pipeline,
+        WORKFLOW_STORAGE_SMOKE: (submit_smoke, STATUS_COMPLETED,
+                                 None),
+        WORKFLOW_OFFLINE_RECONSTRUCT: (submit_offline,
+                                       STATUS_COMPLETED, None),
+        WORKFLOW_VIDEO_RECONSTRUCT: (submit_video,
+                                     STATUS_COMPLETED, None),
+        WORKFLOW_VIDEO_PIPELINE_OFFLINE: (submit_pipeline,
+                                          STATUS_COMPLETED,
+                                          None),
+        # Granted but keyless: the authorized executor fails
+        # for missing credentials before building any client,
+        # so the rigged constructor stays untouched.
+        WORKFLOW_VIDEO_PIPELINE_META: (submit_meta, STATUS_FAILED,
+                                       "CREDENTIAL_MISSING"),
     }
     assert set(cases) == set(SUPPORTED_WORKFLOWS)
-    for workflow, setup in cases.items():
+    for workflow, (setup, expected, error_match) in cases.items():
         record = setup()
         if workflow == WORKFLOW_VIDEO_RECONSTRUCT:
             assert run_once(store, storage, "worker-1",
@@ -569,4 +616,7 @@ def test_registered_workflows_cannot_trigger_meta(
                 record.run_id)
         final = service.get(record.run_id)
         assert final is not None
-        assert final.status == STATUS_COMPLETED
+        assert final.status == expected
+        assert "must not trigger" not in (final.error or "")
+        if error_match is not None:
+            assert error_match in (final.error or "")

@@ -152,8 +152,8 @@ def test_worker_billable_stale_job_not_requeued(
     assert claimed is not None
     # Test scope only: mark the smoke workflow billable so the
     # worker-level refusal path is exercised end to end. The
-    # production registry stays empty; paid execution is
-    # unavailable.
+    # override replaces the production registry for this
+    # test and is reverted afterwards.
     monkeypatch.setattr(
         worker_module, "BILLABLE_WORKFLOWS",
         frozenset({WORKFLOW_STORAGE_SMOKE}))

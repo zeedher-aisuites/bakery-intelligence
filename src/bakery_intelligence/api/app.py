@@ -7,7 +7,9 @@ Endpoints:
   run (multipart ``file`` field plus an explicit ``workflow`` form
   field; ``storage_smoke`` when omitted). ``offline_reconstruct``
   expects a JSON offline bundle as the source (see
-  ``docs/m206/offline-integration.md``).
+  ``docs/m206/offline-integration.md``). ``video_pipeline_meta``
+  additionally requires a ``grant`` form field carrying the
+  authorization document (see ``docs/m206/live-authorization.md``).
 - ``GET /api/analyses/{run_id}``: truthful job status record.
 - ``GET /api/analyses/{run_id}/artifacts/{artifact_id}``: download a
   stored result artifact.
@@ -19,6 +21,7 @@ Run with ``uv run uvicorn bakery_intelligence.api.app:build_app
 from __future__ import annotations
 
 import io
+import json
 import re
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,6 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from bakery_intelligence.api.authorization import GrantError
 from bakery_intelligence.api.jobs import (
     STATUS_FAILED,
     JobService,
@@ -132,7 +136,22 @@ def build_app(storage: StorageBackend | None = None,
     async def create_analysis(
         file: Annotated[UploadFile, File()],
         workflow: Annotated[str, Form()] = WORKFLOW_STORAGE_SMOKE,
+        grant: Annotated[str | None, Form()] = None,
     ) -> dict[str, Any]:
+        grant_payload: dict[str, Any] | None = None
+        if grant is not None:
+            try:
+                parsed = json.loads(grant)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Grant is not valid JSON: {exc}",
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Grant must be a JSON object.")
+            grant_payload = parsed
         content = await file.read()
         if len(content) > MAX_UPLOAD_BYTES:
             raise HTTPException(
@@ -144,8 +163,11 @@ def build_app(storage: StorageBackend | None = None,
         backend.store_source(object_id, io.BytesIO(content))
         try:
             record = service.submit(
-                workflow, source_object_id=object_id)
+                workflow, source_object_id=object_id,
+                grant=grant_payload)
         except UnknownWorkflowError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except GrantError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         return {
             "run_id": record.run_id,

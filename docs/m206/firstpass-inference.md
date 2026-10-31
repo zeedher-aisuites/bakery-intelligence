@@ -199,12 +199,17 @@ Report whether the recorded-replay test ran or skipped.
 
 ## 8. Paid-execution safety (S3, offline only)
 
-Paid execution is not available: no live provider
-client exists, no billable API workflow is registered,
-and the worker billable registry (`BILLABLE_WORKFLOWS`
-in `src/bakery_intelligence/api/worker.py`) is empty.
+At S3 time paid execution was unavailable: no live
+provider client existed, no billable API workflow was
+registered, and the worker billable registry
+(`BILLABLE_WORKFLOWS` in
+`src/bakery_intelligence/api/worker.py`) was empty.
 S3 validates the safety policy a future billable
 client must satisfy, using the fake client only.
+(S5-A later registered `video_pipeline_meta` and
+listed it in the registry; execution still requires
+an explicit per-run grant plus a worker-side key.
+See `docs/m206/live-authorization.md`.)
 
 Billing is an explicit `FirstPassConfig.billable`
 declaration (default `False`), never inferred from

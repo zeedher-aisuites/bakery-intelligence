@@ -299,6 +299,7 @@ def billable_runner_config(
     api_key: str = "",
     pass_id: str = "firstpass",
     batch_size: int = DEFAULT_BATCH_SIZE,
+    max_requests: int | None = None,
     rates_usd_per_m: tuple[float, float] | None = None,
     cost_ceiling_usd: float | None = None,
     strict_cost: bool = False,
@@ -329,6 +330,14 @@ def billable_runner_config(
             "INVALID_CONFIG",
             "batch_size must be a positive int, "
             f"got {batch_size!r}.")
+    if (max_requests is not None and (
+            isinstance(max_requests, bool)
+            or not isinstance(max_requests, int)
+            or max_requests < 0)):
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "max_requests must be a non-negative int or None, "
+            f"got {max_requests!r}.")
     return FirstPassConfig(
         frames=frames,
         source=source,
@@ -341,6 +350,7 @@ def billable_runner_config(
         token_budgets=(token_budget,),
         max_attempts=1,
         billable=True,
+        max_requests=max_requests,
         uncertain_policy="refuse",
         api_key=api_key,
         client_factory=client_factory,

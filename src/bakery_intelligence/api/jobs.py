@@ -28,6 +28,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from bakery_intelligence.api.authorization import (
+    GrantError,
+    grant_to_json,
+    parse_grant,
+)
+
 if TYPE_CHECKING:
     from bakery_intelligence.api.store import SqliteJobStore
 
@@ -41,12 +47,17 @@ SMOKE_RESULT_ARTIFACT = "smoke_result.json"
 WORKFLOW_OFFLINE_RECONSTRUCT = "offline_reconstruct"
 WORKFLOW_VIDEO_RECONSTRUCT = "video_reconstruct"
 WORKFLOW_VIDEO_PIPELINE_OFFLINE = "video_pipeline_offline"
+# S5-A: explicitly authorized billable pipeline. Submitting it
+# requires a validated authorization grant; merely starting the
+# API or worker can never dispatch it.
+WORKFLOW_VIDEO_PIPELINE_META = "video_pipeline_meta"
 
 SUPPORTED_WORKFLOWS = (
     WORKFLOW_STORAGE_SMOKE,
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_VIDEO_RECONSTRUCT,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+    WORKFLOW_VIDEO_PIPELINE_META,
 )
 
 
@@ -82,6 +93,9 @@ class JobRecord:
     heartbeat_at: str | None = None
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
+    # Canonical grant JSON (meta workflow only). Deliberately
+    # excluded from to_dict: operator-internal, never served.
+    grant_json: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the public JSON representation of this job."""
@@ -112,14 +126,33 @@ class JobService:
         return self._store
 
     def submit(self, workflow: str,
-               source_object_id: str | None = None) -> JobRecord:
+               source_object_id: str | None = None,
+               grant: dict[str, Any] | None = None) -> JobRecord:
         """Persist a queued job and return immediately (never blocks)."""
         if workflow not in SUPPORTED_WORKFLOWS:
             raise UnknownWorkflowError(
                 f"Unsupported workflow: {workflow!r}.")
+        grant_json: str | None = None
+        if workflow == WORKFLOW_VIDEO_PIPELINE_META:
+            if grant is None:
+                raise GrantError(
+                    f"Workflow {workflow!r} requires an "
+                    "authorization grant; refusing unauthorized "
+                    "billable submission.")
+            parsed = parse_grant(grant)
+            if parsed.workflow != workflow:
+                raise GrantError(
+                    f"Grant workflow {parsed.workflow!r} does not "
+                    f"match submitted workflow {workflow!r}.")
+            grant_json = grant_to_json(parsed)
+        elif grant is not None:
+            raise GrantError(
+                f"Workflow {workflow!r} does not accept an "
+                "authorization grant.")
         record = JobRecord(
             run_id=new_run_id(), workflow=workflow,
             source_object_id=source_object_id,
+            grant_json=grant_json,
         )
         self._store.create(record)
         return record

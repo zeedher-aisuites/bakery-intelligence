@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   claimed_at TEXT,
   heartbeat_at TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  grant_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
 """
@@ -51,7 +52,7 @@ _COLUMNS = (
     "run_id", "workflow", "status", "source_object_id",
     "source_sha256", "artifact_ids", "artifact_sha256", "error",
     "attempts", "claimed_by", "claimed_at", "heartbeat_at",
-    "created_at", "updated_at",
+    "created_at", "updated_at", "grant_json",
 )
 
 
@@ -74,6 +75,21 @@ class SqliteJobStore:
         self._write_lock = threading.Lock()
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            self._migrate(connection)
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        """Add columns missing from pre-existing databases.
+
+        Idempotent: fresh databases already match SCHEMA, and
+        migrated databases keep every existing row with the
+        new column NULL.
+        """
+        names = {row[1] for row in connection.execute(
+            "PRAGMA table_info(jobs);").fetchall()}
+        if "grant_json" not in names:
+            connection.execute(
+                "ALTER TABLE jobs ADD COLUMN grant_json TEXT;")
 
     @property
     def db_path(self) -> Path:
@@ -105,15 +121,17 @@ class SqliteJobStore:
                 "INSERT INTO jobs (run_id, workflow, status,"
                 " source_object_id, source_sha256, artifact_ids,"
                 " artifact_sha256, error, attempts, claimed_by,"
-                " claimed_at, heartbeat_at, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " claimed_at, heartbeat_at, created_at, updated_at,"
+                " grant_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (record.run_id, record.workflow, record.status,
                  record.source_object_id, record.source_sha256,
                  json.dumps(record.artifact_ids),
                  json.dumps(record.artifact_sha256),
                  record.error, record.attempts, record.claimed_by,
                  record.claimed_at, record.heartbeat_at,
-                 record.created_at, record.updated_at),
+                 record.created_at, record.updated_at,
+                 record.grant_json),
             )
 
     def get(self, run_id: str) -> JobRecord | None:

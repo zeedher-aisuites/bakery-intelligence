@@ -7,11 +7,15 @@ exercised through an injected SDK double in
 `tests/test_inference_meta_spark.py`; no test contacts the
 network, and S4-A wires no live path.
 
-Paid execution is not available: no billable API workflow
-exists, the worker billable registry is empty, and key
-provisioning plus authorization grants remain S5 duties.
-S4-A validates the adapter contract and the S3 safety
-posture a future integration must satisfy.
+At S4-A time paid execution was unavailable: no
+billable API workflow existed, the worker billable
+registry was empty, and key provisioning plus
+authorization grants remained S5 duties. S4-A
+validates the adapter contract and the S3 safety
+posture a future integration must satisfy. (S5-A
+adds the grant mechanism and the authorized
+`video_pipeline_meta` workflow; see
+`docs/m206/live-authorization.md`.)
 
 ## 1. Verified contract elements
 

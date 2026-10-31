@@ -28,12 +28,20 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from bakery_intelligence.api.authorization import (
+    GrantError,
+    parse_grant,
+    redact_key,
+    resolve_api_key,
+)
 from bakery_intelligence.api.jobs import (
+    WORKFLOW_VIDEO_PIPELINE_META,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
     utc_now_iso,
 )
@@ -58,6 +66,7 @@ from bakery_intelligence.inference.firstpass import (
     prompt_hash,
 )
 from bakery_intelligence.inference.meta_spark import (
+    MetaSparkClient,
     billable_runner_config,
 )
 from bakery_intelligence.video.extract import (
@@ -116,6 +125,60 @@ VIDEO_METADATA_KEYS = (
 
 class PipelineResumeError(ValueError):
     """Durable pipeline state is missing, corrupt, or mismatched."""
+
+
+def _validate_billable_bounds(
+        token_budget: int, max_requests: int | None,
+        cost_ceiling_usd: float | None,
+        rates_usd_per_m: tuple[float, float] | None,
+        strict_cost: bool, api_key: str) -> None:
+    """Reject malformed billing bounds before any state write.
+
+    The key travels opaquely and is never inspected beyond
+    its type: emptiness is legal for test-double clients,
+    while the authorized executor always supplies a key it
+    resolved from the worker environment.
+    """
+    if not isinstance(api_key, str):
+        raise ValueError(
+            "billable_api_key must be a str, "
+            f"got {type(api_key).__name__}.")
+    if (isinstance(token_budget, bool)
+            or not isinstance(token_budget, int)
+            or token_budget <= 0):
+        raise ValueError(
+            "billable_token_budget must be a positive int, "
+            f"got {token_budget!r}.")
+    if (max_requests is not None and (
+            isinstance(max_requests, bool)
+            or not isinstance(max_requests, int)
+            or max_requests < 0)):
+        raise ValueError(
+            "billable_max_requests must be a non-negative int "
+            f"or None, got {max_requests!r}.")
+    if (cost_ceiling_usd is not None and (
+            isinstance(cost_ceiling_usd, bool)
+            or not isinstance(cost_ceiling_usd, (int, float))
+            or not math.isfinite(cost_ceiling_usd)
+            or cost_ceiling_usd < 0)):
+        raise ValueError(
+            "billable_cost_ceiling_usd must be a non-negative "
+            f"finite number or None, got {cost_ceiling_usd!r}.")
+    if rates_usd_per_m is not None and (
+            not isinstance(rates_usd_per_m, (list, tuple))
+            or len(rates_usd_per_m) != 2
+            or any(isinstance(rate, bool)
+                   or not isinstance(rate, (int, float))
+                   or not math.isfinite(rate) or rate < 0
+                   for rate in rates_usd_per_m)):
+        raise ValueError(
+            "billable_rates_usd_per_m must be None or a pair "
+            "of non-negative finite numbers, "
+            f"got {rates_usd_per_m!r}.")
+    if not isinstance(strict_cost, bool):
+        raise ValueError(
+            "billable_strict_cost must be a bool, "
+            f"got {strict_cost!r}.")
 
 
 def build_pipeline_temporal(event_id: str,
@@ -594,6 +657,11 @@ def run_pipeline_offline(
     max_frames: int = PIPELINE_MAX_FRAMES,
     billable_client: InferenceClient | None = None,
     billable_token_budget: int = 1024,
+    billable_max_requests: int | None = None,
+    billable_cost_ceiling_usd: float | None = None,
+    billable_rates_usd_per_m: tuple[float, float] | None = None,
+    billable_strict_cost: bool = False,
+    billable_api_key: str = "",
 ) -> dict[str, bytes]:
     """Run all pipeline stages; return id -> bytes artifacts.
 
@@ -631,17 +699,29 @@ def run_pipeline_offline(
         raise ValueError(
             "Pipeline accepts at most one inference client "
             "override (fake or billable_client).")
-    if meta_backed and (
-            isinstance(billable_token_budget, bool)
-            or not isinstance(billable_token_budget, int)
-            or billable_token_budget <= 0):
+    if not meta_backed and (
+            billable_token_budget != 1024
+            or billable_max_requests is not None
+            or billable_cost_ceiling_usd is not None
+            or billable_rates_usd_per_m is not None
+            or billable_strict_cost is not False
+            or billable_api_key != ""):
         raise ValueError(
-            "billable_token_budget must be a positive int, "
-            f"got {billable_token_budget!r}.")
+            "billable_* parameters require billable_client; "
+            "refusing to silently ignore billing bounds.")
+    if meta_backed:
+        _validate_billable_bounds(
+            billable_token_budget, billable_max_requests,
+            billable_cost_ceiling_usd, billable_rates_usd_per_m,
+            billable_strict_cost, billable_api_key)
     client: InferenceClient = (
         billable_client if meta_backed
         else fake or DeterministicFakeClient())
     provider_id = META_PROVIDER_ID if meta_backed else FAKE_PROVIDER_ID
+    fingerprinted_rates = (
+        list(billable_rates_usd_per_m)
+        if meta_backed and billable_rates_usd_per_m is not None
+        else None)
     staged_name, sidecar_name = _staged_names(
         video_name, actual_sha)
     firstpass_config = {
@@ -653,14 +733,18 @@ def run_pipeline_offline(
             [billable_token_budget] if meta_backed
             else list(DEFAULT_BUDGETS)),
         "prompt_sha256": prompt_hash(PIPELINE_PROMPT),
-        "max_requests": None,
-        "cost_ceiling_usd": None,
-        "strict_cost": False,
-        # S3/S4-B: billing posture and execution policy are
-        # fingerprinted. Any mismatch (provider, model,
-        # budgets, attempts, billing, uncertain policy)
-        # refuses resume with a diff instead of resuming
-        # onto a different execution policy.
+        "max_requests": (
+            billable_max_requests if meta_backed else None),
+        "cost_ceiling_usd": (
+            billable_cost_ceiling_usd if meta_backed else None),
+        "rates_usd_per_m": fingerprinted_rates,
+        "strict_cost": (
+            billable_strict_cost if meta_backed else False),
+        # S3/S4-B/S5-A: billing posture and execution policy
+        # are fingerprinted. Any mismatch (provider, model,
+        # budgets, attempts, billing, uncertain policy,
+        # request/cost guards) refuses resume with a diff
+        # instead of resuming onto a different policy.
         "max_attempts": 1 if meta_backed else DEFAULT_MAX_ATTEMPTS,
         "billable": meta_backed,
         "uncertain_policy": (
@@ -793,6 +877,14 @@ def run_pipeline_offline(
                 token_budget=billable_token_budget,
                 pass_id=firstpass_config["pass_id"],
                 batch_size=firstpass_config["batch_size"],
+                max_requests=billable_max_requests,
+                rates_usd_per_m=(
+                    tuple(billable_rates_usd_per_m)
+                    if billable_rates_usd_per_m is not None
+                    else None),
+                cost_ceiling_usd=billable_cost_ceiling_usd,
+                strict_cost=billable_strict_cost,
+                api_key=billable_api_key,
             )
         else:
             runner_config = FirstPassConfig(
@@ -936,3 +1028,82 @@ def execute_video_pipeline_offline(
         source_sha256=hashlib.sha256(raw).hexdigest(),
         work_dir=storage.run_work_dir(record.run_id),
     )
+
+
+def _build_meta_client(*, model: str, timeout_seconds: float,
+                       store: bool) -> InferenceClient:
+    """Construct the billable Meta client (live-capable SDK).
+
+    Tests monkeypatch this seam to inject test-double SDKs.
+    Production always returns a real-factory client, so the
+    seam is reachable only through the authorized executor
+    below: no registered fake workflow touches it.
+    """
+    return MetaSparkClient(
+        model=model, timeout_seconds=timeout_seconds,
+        store=store)
+
+
+def execute_video_pipeline_meta(
+        storage: StorageBackend,
+        record: JobRecord) -> dict[str, bytes]:
+    """Worker entry point: authorized billable Meta pipeline.
+
+    Authorization first: the stored grant must validate and
+    match this job, and a provider key must be present in
+    the worker environment. Only then is the client built
+    and the billable seam executed with the granted bounds.
+    Any failure before or during execution fails the job
+    explicitly without automatic retry; the key never
+    reaches persisted errors or artifacts.
+    """
+    if record.grant_json is None:
+        raise GrantError(
+            f"Workflow {record.workflow!r} requires an "
+            "authorization grant; refusing unauthorized "
+            "billable execution.")
+    try:
+        grant = parse_grant(json.loads(record.grant_json))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise GrantError(
+            f"Stored grant for {record.run_id} is invalid: "
+            f"{exc}") from exc
+    if grant.workflow != record.workflow:
+        raise GrantError(
+            f"Grant workflow {grant.workflow!r} does not match "
+            f"job workflow {record.workflow!r}.")
+    api_key = resolve_api_key()
+    if record.source_object_id is None:
+        raise ValueError(
+            f"{WORKFLOW_VIDEO_PIPELINE_META} requires a source.")
+    if not storage.source_exists(record.source_object_id):
+        raise ValueError(
+            f"Unknown source: {record.source_object_id!r}.")
+    with storage.open_source(record.source_object_id) as handle:
+        raw = handle.read()
+    client = _build_meta_client(
+        model=grant.model, timeout_seconds=grant.timeout_seconds,
+        store=grant.store)
+    try:
+        return run_pipeline_offline(
+            video_bytes=raw,
+            video_name=record.source_object_id,
+            run_id=record.run_id,
+            source_object_id=record.source_object_id,
+            source_sha256=hashlib.sha256(raw).hexdigest(),
+            work_dir=storage.run_work_dir(record.run_id),
+            billable_client=client,
+            billable_token_budget=grant.token_budget,
+            billable_max_requests=grant.max_requests,
+            billable_cost_ceiling_usd=grant.cost_ceiling_usd,
+            billable_rates_usd_per_m=grant.rates_usd_per_m,
+            billable_strict_cost=grant.strict_cost,
+            billable_api_key=api_key,
+            max_frames=grant.max_frames,
+        )
+    except Exception as exc:
+        message = str(exc)
+        cleaned = redact_key(message, api_key)
+        if cleaned != message:
+            raise RuntimeError(cleaned) from None
+        raise
