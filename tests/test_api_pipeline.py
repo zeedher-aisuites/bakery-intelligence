@@ -27,6 +27,7 @@ from bakery_intelligence.api.jobs import (
 from bakery_intelligence.api.pipeline import (
     FIRSTPASS_REPORT_ARTIFACT,
     PIPELINE_SUMMARY_ARTIFACT,
+    PipelineResumeError,
     run_pipeline_offline,
 )
 from bakery_intelligence.api.storage import (
@@ -44,14 +45,20 @@ from bakery_intelligence.inference.firstpass import InferenceError
 
 
 def _make_video(path: Path, fps: float = 10.0,
-                frame_count: int = 30) -> Path:
-    """Write a synthetic MJPG video; skip when encoding fails."""
+                frame_count: int = 30,
+                shade_offset: int = 0) -> Path:
+    """Write a synthetic MJPG video; skip when encoding fails.
+
+    Output depends only on the encoding parameters, never on
+    the filename; ``shade_offset`` shifts frame shades for
+    tests needing deterministically different videos.
+    """
     writer = cv2.VideoWriter(
         str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (64, 48))
     if not writer.isOpened():
         pytest.skip("MJPG video encoding is unavailable.")
     for index in range(frame_count):
-        shade = (index * 7) % 256
+        shade = (index * 7 + shade_offset) % 256
         writer.write(np.full((48, 64, 3), shade, dtype=np.uint8))
     writer.release()
     return path
@@ -355,3 +362,185 @@ def test_api_end_to_end_pipeline(tmp_path: Path) -> None:
         f"{PIPELINE_SUMMARY_ARTIFACT}")
     assert summary.status_code == 200
     assert summary.json()["synthetic_inference"] is True
+
+
+# Durable checkpoints and safe recovery (M2-06C.5/S2) --------------------
+
+
+class _CountingFake(DeterministicFakeClient):
+    """Deterministic fake that records submitted frame indices."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.indices: list[int] = []
+
+    def submit(self, prompt_text: str, image_paths: Any,
+               api_key: str, max_output_tokens: int) -> Any:
+        stem = Path(str(image_paths[0])).stem
+        self.indices.append(int(stem.split("_")[1]))
+        return super().submit(prompt_text, image_paths, api_key,
+                              max_output_tokens)
+
+
+def _pipeline_kwargs(tmp_path: Path, raw: bytes,
+                     work_dir: Path) -> dict[str, Any]:
+    return {
+        "video_bytes": raw,
+        "video_name": "clip.avi",
+        "run_id": "run_0123456789ab",
+        "source_object_id": "clip.avi",
+        "source_sha256": sha256_hex(raw),
+        "work_dir": work_dir,
+    }
+
+
+def test_pipeline_crash_resumes_without_replay(
+        tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi",
+                      frame_count=70).read_bytes()
+    work_dir = tmp_path / "work"
+    kwargs = _pipeline_kwargs(tmp_path, raw, work_dir)
+    crashing = _CountingFake(
+        overrides={50: RuntimeError("simulated crash")})
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_pipeline_offline(fake=crashing, **kwargs)
+    assert crashing.indices == [0, 10, 20, 30, 40, 50]
+    state = json.loads((work_dir / "pipeline_state.json"
+                        ).read_text(encoding="utf-8"))
+    assert state["stage"] == "firstpass_running"
+    clean = _CountingFake()
+    artifacts = run_pipeline_offline(fake=clean, **kwargs)
+    assert clean.indices == [50, 60]
+    measurements = json.loads(artifacts["measurements.json"])
+    assert sorted(item["frame_index"]
+                  for item in measurements["measurements"]) == [
+                      0, 10, 20, 30, 40, 50, 60]
+    summary = json.loads(artifacts["pipeline_summary.json"])
+    assert summary["resumed"] is True
+    assert summary["firstpass"]["frames_observed"] == 7
+    assert summary["firstpass"]["frames_failed"] == 0
+    firstpass = json.loads(artifacts["firstpass_report.json"])
+    assert firstpass["budget"]["prior_requests_submitted"] == 5
+    assert firstpass["budget"]["requests_submitted"] == 2
+    assert firstpass["budget"]["uncertain_frame_indices"] == [
+        50, 60]
+
+
+def test_pipeline_done_stage_skips_rerun(tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    work_dir = tmp_path / "work"
+    kwargs = _pipeline_kwargs(tmp_path, raw, work_dir)
+    first = _CountingFake()
+    before = run_pipeline_offline(fake=first, **kwargs)
+    assert first.indices == [0, 10, 20]
+    second = _CountingFake()
+    after = run_pipeline_offline(fake=second, **kwargs)
+    assert second.indices == []
+    assert after["measurements.json"] == before[
+        "measurements.json"]
+    summary = json.loads(after["pipeline_summary.json"])
+    assert summary["resumed"] is True
+
+
+def test_pipeline_fresh_run_records_unresumed_state(
+        tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    work_dir = tmp_path / "work"
+    artifacts = run_pipeline_offline(
+        **_pipeline_kwargs(tmp_path, raw, work_dir))
+    state = json.loads((work_dir / "pipeline_state.json"
+                        ).read_text(encoding="utf-8"))
+    assert state["state_version"] == "pipeline-workdir/1"
+    assert state["stage"] == "firstpass_done"
+    summary = json.loads(artifacts["pipeline_summary.json"])
+    assert summary["resumed"] is False
+
+
+def test_pipeline_resume_mismatches_refused(
+        tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    work_dir = tmp_path / "work"
+    kwargs = _pipeline_kwargs(tmp_path, raw, work_dir)
+    run_pipeline_offline(**kwargs)
+    with pytest.raises(PipelineResumeError, match="sample_fps"):
+        run_pipeline_offline(sample_fps=2.0, **kwargs)
+    other = _make_video(tmp_path / "other.avi",
+                        shade_offset=100).read_bytes()
+    assert sha256_hex(other) != sha256_hex(raw)
+    with pytest.raises(PipelineResumeError,
+                       match="source_sha256"):
+        run_pipeline_offline(video_bytes=other,
+                             source_sha256=sha256_hex(other),
+                             **{key: value for key, value in
+                                 kwargs.items()
+                                 if key not in ("video_bytes",
+                                                "source_sha256")})
+    alien = DeterministicFakeClient(model_id="alien-model")
+    with pytest.raises(PipelineResumeError, match="model"):
+        run_pipeline_offline(fake=alien, **kwargs)
+
+
+def test_pipeline_tampered_frame_refused(tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    work_dir = tmp_path / "work"
+    kwargs = _pipeline_kwargs(tmp_path, raw, work_dir)
+    run_pipeline_offline(**kwargs)
+    frame = work_dir / "frames" / "frame_00000010.jpg"
+    data = bytearray(frame.read_bytes())
+    data[10] ^= 0xFF
+    frame.write_bytes(bytes(data))
+    with pytest.raises(PipelineResumeError, match="frame 10"):
+        run_pipeline_offline(**kwargs)
+
+
+def test_pipeline_stateless_firstpass_debris_refused(
+        tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    work_dir = tmp_path / "work"
+    kwargs = _pipeline_kwargs(tmp_path, raw, work_dir)
+    crashing = _CountingFake(
+        overrides={10: RuntimeError("simulated crash")})
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_pipeline_offline(fake=crashing, **kwargs)
+    (work_dir / "pipeline_state.json").unlink()
+    clean = _CountingFake()
+    with pytest.raises(PipelineResumeError,
+                       match="without pipeline state"):
+        run_pipeline_offline(fake=clean, **kwargs)
+    assert clean.indices == []
+
+
+def test_worker_restart_resumes_pipeline_without_replay(
+        tmp_path: Path) -> None:
+    storage, store, service = _stack(tmp_path)
+    raw = _make_video(tmp_path / "clip.avi",
+                      frame_count=70).read_bytes()
+    record = _submit_video(storage, service, raw)
+    work_dir = storage.run_work_dir(record.run_id)
+    crashing = _CountingFake(
+        overrides={50: RuntimeError("simulated crash")})
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_pipeline_offline(
+            video_bytes=raw, video_name="clip.avi",
+            run_id=record.run_id, source_object_id="clip.avi",
+            source_sha256=sha256_hex(raw), work_dir=work_dir,
+            fake=crashing)
+    assert crashing.indices == [0, 10, 20, 30, 40, 50]
+    claimed = store.claim_next(
+        "crashed-worker", "2020-01-01T00:00:00+00:00")
+    assert claimed is not None
+    assert run_once(store, storage, "worker-1") == record.run_id
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_COMPLETED
+    assert final.attempts == 2
+    firstpass = _read_json(storage, record.run_id,
+                            FIRSTPASS_REPORT_ARTIFACT)
+    assert firstpass["budget"]["prior_requests_submitted"] == 5
+    assert firstpass["budget"]["requests_submitted"] == 2
+    assert firstpass["budget"]["uncertain_frame_indices"] == [
+        50, 60]
+    summary = _read_json(storage, record.run_id,
+                          PIPELINE_SUMMARY_ARTIFACT)
+    assert summary["resumed"] is True
+    assert summary["firstpass"]["frames_observed"] == 7

@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from pathlib import Path
 
+import pytest
+
+import bakery_intelligence.api.worker as worker_module
 from bakery_intelligence.api.jobs import (
     STATUS_COMPLETED,
     STATUS_FAILED,
+    JobRecord,
     JobService,
     WORKFLOW_STORAGE_SMOKE,
 )
@@ -102,3 +107,35 @@ def test_completed_state_survives_restart(tmp_path: Path) -> None:
     assert reread is not None
     assert reread.status == STATUS_COMPLETED
     assert reread.artifact_ids == ["smoke_result.json"]
+
+
+def test_worker_heartbeats_during_long_execution(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage, store, service = _stack(tmp_path)
+    storage.store_source("clip01.mp4", io.BytesIO(b"fake-video"))
+    record = service.submit(
+        WORKFLOW_STORAGE_SMOKE, source_object_id="clip01.mp4")
+    beats: list[str] = []
+    real_heartbeat = store.heartbeat
+
+    def counting_heartbeat(run_id: str, worker_id: str,
+                           now_iso: str) -> bool:
+        beats.append(now_iso)
+        return real_heartbeat(run_id, worker_id, now_iso)
+
+    monkeypatch.setattr(store, "heartbeat", counting_heartbeat)
+
+    def slow_executor(storage: LocalStorageBackend,
+                      record: JobRecord) -> dict[str, bytes]:
+        time.sleep(0.2)
+        return {}
+
+    monkeypatch.setitem(
+        worker_module._EXECUTORS, WORKFLOW_STORAGE_SMOKE,
+        slow_executor)
+    assert run_once(store, storage, "worker-1",
+                    heartbeat_seconds=0.01) == record.run_id
+    assert len(beats) >= 2
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_COMPLETED

@@ -12,6 +12,11 @@ after a worker crash (see ``WORKFLOW_MAX_ATTEMPTS``). Explicit
 failures never retry automatically. Unknown future workflows —
 including any paid inference — default to zero requeue attempts,
 so duplicate paid operations require a deliberate policy entry.
+
+While an executor runs, a daemon thread refreshes the claim
+heartbeat (S2), so a slow job is not mistaken for a crashed
+worker and claimed twice. Heartbeats are best effort: a
+heartbeat failure never fails the job itself.
 """
 
 from __future__ import annotations
@@ -50,6 +55,8 @@ from bakery_intelligence.api.store import SqliteJobStore
 
 DEFAULT_POLL_SECONDS = 2.0
 DEFAULT_STALE_SECONDS = 300.0
+DEFAULT_HEARTBEAT_SECONDS = 30.0
+_HEARTBEAT_JOIN_SECONDS = 10.0
 
 # Attempts are counted at claim time (first claim => attempts == 1).
 # A workflow listed here tolerates that many total attempts; anything
@@ -66,7 +73,8 @@ WORKFLOW_MAX_ATTEMPTS = {
     # paid operations must never inherit an offline retry budget.
     WORKFLOW_VIDEO_RECONSTRUCT: 2,
     # Offline pipeline: deterministic fake inference over staged
-    # bytes in a temp directory, idempotent on re-execution.
+    # bytes in a durable run-scoped work directory; a requeued
+    # attempt resumes verified progress instead of restarting.
     # Same re-evaluation duty applies before any paid stage.
     WORKFLOW_VIDEO_PIPELINE_OFFLINE: 2,
 }
@@ -149,15 +157,41 @@ def _store_verified(storage: StorageBackend, run_id: str,
     return digests
 
 
+def _heartbeat_loop(store: SqliteJobStore, run_id: str,
+                    worker_id: str, stop_event: threading.Event,
+                    interval_seconds: float) -> None:
+    """Refresh the claim heartbeat until stopped (best effort).
+
+    Stops quietly when ownership is lost; store errors are
+    swallowed so a heartbeat failure can never fail the job.
+    A non-positive interval disables thread beats (the
+    explicit claim-time heartbeat still runs).
+    """
+    if interval_seconds <= 0:
+        return
+    while not stop_event.wait(interval_seconds):
+        try:
+            alive = store.heartbeat(
+                run_id, worker_id, utc_now_iso())
+        except Exception:
+            continue
+        if not alive:
+            return
+
+
 def run_once(store: SqliteJobStore, storage: StorageBackend,
              worker_id: str,
-             evidence_dir: Path | None = None) -> str | None:
+             evidence_dir: Path | None = None,
+             heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS,
+             ) -> str | None:
     """Claim and execute one job; return its run id or None if idle.
 
     Recovery of stale jobs runs first so a restarted worker picks up
     work orphaned by a crashed predecessor before taking new jobs.
     ``evidence_dir`` roots recorded-evidence resolution for the
     video workflow; other workflows ignore it.
+    ``heartbeat_seconds`` sets the execution heartbeat interval;
+    non-positive values disable thread beats for tests.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -173,13 +207,27 @@ def run_once(store: SqliteJobStore, storage: StorageBackend,
             raise ValueError(
                 f"Unsupported workflow: {record.workflow!r}.")
         store.heartbeat(record.run_id, worker_id, utc_now_iso())
-        if record.workflow == WORKFLOW_VIDEO_RECONSTRUCT:
-            # Video resolution needs the evidence root, so it
-            # dispatches explicitly instead of via _EXECUTORS.
-            artifacts = execute_video_reconstruct(
-                storage, record, evidence_dir)
-        else:
-            artifacts = _EXECUTORS[record.workflow](storage, record)
+        stop_beating = threading.Event()
+        beater = threading.Thread(
+            target=_heartbeat_loop,
+            args=(store, record.run_id, worker_id, stop_beating,
+                  heartbeat_seconds),
+            name=f"heartbeat-{record.run_id}",
+            daemon=True,
+        )
+        beater.start()
+        try:
+            if record.workflow == WORKFLOW_VIDEO_RECONSTRUCT:
+                # Video resolution needs the evidence root, so it
+                # dispatches explicitly instead of via _EXECUTORS.
+                artifacts = execute_video_reconstruct(
+                    storage, record, evidence_dir)
+            else:
+                artifacts = _EXECUTORS[record.workflow](
+                    storage, record)
+        finally:
+            stop_beating.set()
+            beater.join(timeout=_HEARTBEAT_JOIN_SECONDS)
         digests = _store_verified(storage, record.run_id, artifacts)
         source_sha = _hash_source(storage, record.source_object_id)
         store.complete(record.run_id, worker_id, utc_now_iso(),

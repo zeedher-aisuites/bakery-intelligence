@@ -23,6 +23,7 @@ accounting from checkpoints instead of resetting it.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import math
@@ -92,6 +93,18 @@ STOP_STRICT_UNKNOWN_COST = "unknown_cost_strict_halt"
 # so far; input tokens are unknowable before dispatch, so this
 # is explicitly not a guarantee (see the ledger).
 RESERVE_BASIS_OBSERVED_MAX = "max_observed_single_request_estimate"
+
+# Batch-start marker files (S2). A marker without a matching
+# checkpoint record means the batch may have submitted requests
+# whose outcomes were never durably recorded: uncertain.
+MARKER_PREFIX = "started_"
+MARKER_SUFFIX = ".json"
+
+# Uncertain-batch policies (S2). "rerun" re-attempts uncertain
+# batches (safe for free deterministic clients); "refuse"
+# fails closed for operator resolution (required for paid use).
+UNCERTAIN_RERUN = "rerun"
+UNCERTAIN_REFUSE = "refuse"
 
 DEFAULT_BATCH_SIZE = 5
 DEFAULT_MAX_ATTEMPTS = 4
@@ -243,6 +256,7 @@ class FirstPassConfig:
     max_requests: int | None = None
     cost_ceiling_usd: float | None = None
     strict_cost: bool = False
+    uncertain_policy: str = "rerun"
     api_key: str = ""
     client_factory: Callable[[], InferenceClient] | None = None
     sleeper: Callable[[float], None] = time.sleep
@@ -265,11 +279,12 @@ class BudgetPolicy:
 
 
 def _validate_budget_config(config: FirstPassConfig) -> None:
-    """Reject malformed request/cost limits before any request.
+    """Reject malformed run guards before any request.
 
     Zero is a valid limit (it simply allows no submits or no
     spend); negative, non-finite, and mistyped limits are
-    configuration defects, never silently coerced.
+    configuration defects, never silently coerced. The
+    uncertain-batch policy must name a known behavior.
     """
     limit = config.max_requests
     if limit is not None and (
@@ -295,6 +310,12 @@ def _validate_budget_config(config: FirstPassConfig) -> None:
             "INVALID_CONFIG",
             "strict_cost must be a bool, "
             f"got {config.strict_cost!r}.")
+    if config.uncertain_policy not in (
+            UNCERTAIN_RERUN, UNCERTAIN_REFUSE):
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "uncertain_policy must be 'rerun' or 'refuse', "
+            f"got {config.uncertain_policy!r}.")
 
 
 @dataclass
@@ -311,9 +332,11 @@ class _BudgetLedger:
 
     Resume seeds the prior counters from checkpoints, so
     enforcement applies to lifetime totals rather than a
-    reset zero. Only records for batches that will not
-    re-run seed accounting; batches that re-run as a unit
-    count their new submits fresh (the known 006 re-spend).
+    reset zero. Completed, budget-stopped, and
+    review-required batches all seed their recorded
+    counters; review batches resume only their unobserved
+    frames, so known-good requests are never re-submitted
+    merely because a batch needs review.
 
     Guarantees and gaps: the request cap is exact — no
     submit leaves after it trips. The cost ceiling halts
@@ -331,6 +354,7 @@ class _BudgetLedger:
     ceiling: float | None
     strict: bool
     rates: tuple[float, float] | None
+    uncertain_policy: str = UNCERTAIN_RERUN
     prior_requests: int = 0
     prior_spent: float = 0.0
     prior_unknown: int = 0
@@ -504,7 +528,8 @@ class _BudgetLedger:
                 and index not in self.attempted]
 
     def report_block(
-            self, remaining: list[int]) -> dict[str, Any]:
+            self, remaining: list[int],
+            uncertain: list[int]) -> dict[str, Any]:
         """Assemble the additive budget report section."""
         spent = round(self.spent, 4)
         prior_spent = round(self.prior_spent, 4)
@@ -544,6 +569,8 @@ class _BudgetLedger:
             "stopped_reason": self.stopped_reason,
             "stopped_detail": self.stopped_detail,
             "remaining_frame_indices": remaining,
+            "uncertain_frame_indices": list(uncertain),
+            "uncertain_policy": self.uncertain_policy,
         }
 
 
@@ -551,8 +578,12 @@ def _seed_ledger(config: FirstPassConfig,
                  index: dict[str, Any]) -> _BudgetLedger:
     """Build the ledger, seeding resume counters from checkpoints.
 
-    Only records for batches that will not re-run seed
-    accounting: completed spans and budget-stopped partials.
+    Completed spans seed fully; budget-stopped and
+    review-required batches seed their recorded counters
+    plus their observed frames, since resume re-runs only
+    their unobserved remainder. Pre-S1 review records lack
+    the observed list; run() fills that gap from the batch
+    observation files it is already merging.
     """
     ledger = _BudgetLedger(
         max_requests=config.max_requests,
@@ -560,13 +591,14 @@ def _seed_ledger(config: FirstPassConfig,
                  else float(config.cost_ceiling_usd)),
         strict=config.strict_cost,
         rates=config.rates_usd_per_m,
+        uncertain_policy=config.uncertain_policy,
     )
     recorded = reconstructed = 0
     for record in index.values():
         status = record.get("status")
         if status == "completed":
             frames = list(record.get("frame_indices", []))
-        elif status == "budget_stopped":
+        elif status in ("budget_stopped", "needs_human_review"):
             frames = list(
                 record.get("completed_frame_indices", []))
         else:
@@ -615,6 +647,12 @@ def _seed_ledger(config: FirstPassConfig,
         ledger.prior_basis = "recorded"
     elif reconstructed:
         ledger.prior_basis = "reconstructed_from_token_totals"
+    if (ledger.prior_requests < 0 or ledger.prior_spent < 0
+            or ledger.prior_unknown < 0):
+        raise FirstPassError(
+            "CHECKPOINT_CORRUPT",
+            "Checkpoint counters are negative; refusing resume.",
+        )
     return ledger
 
 
@@ -831,13 +869,39 @@ class FirstPassRunner:
         return delay + rng.uniform(0.0, delay * 0.25)
 
     def _load_checkpoint_index(self, path: Path) -> dict[str, Any]:
+        """Index checkpoints by batch, recovering a torn tail.
+
+        Appends are single-writer, so only the final line can
+        tear in a crash; it is truncated and ignored, and the
+        batch it belonged to resumes as uncertain (its start
+        marker survives). A malformed line ahead of more
+        content is corruption, and fails closed.
+        """
         completed: dict[str, Any] = {}
         if not path.exists():
             return completed
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
+        chunks = path.read_bytes().split(b"\n")
+        offset = 0
+        for position, chunk in enumerate(chunks):
+            start = offset
+            offset += len(chunk) + 1
+            if not chunk.strip():
                 continue
-            record = json.loads(line)
+            try:
+                record = json.loads(chunk.decode("utf-8"))
+            except (UnicodeDecodeError,
+                    json.JSONDecodeError) as exc:
+                if any(rest.strip()
+                       for rest in chunks[position + 1:]):
+                    raise FirstPassError(
+                        "CHECKPOINT_CORRUPT",
+                        "Checkpoint log has a malformed line "
+                        "ahead of more content; refusing resume.",
+                        path.name,
+                    ) from exc
+                with path.open("r+b") as handle:
+                    handle.truncate(start)
+                break
             completed[record["batch_id"]] = record
         return completed
 
@@ -1055,6 +1119,15 @@ class FirstPassRunner:
         token_retry_output_tokens = 0
         token_retried_requests = 0
         token_recovered = 0
+        _write_json(
+            paths["checkpoints"].parent
+            / f"{MARKER_PREFIX}{batch_id}{MARKER_SUFFIX}",
+            {"batch_id": batch_id,
+             "frame_indices": [item.frame.frame_index
+                               for item in prepared],
+             "started_at_utc": datetime.datetime.now(
+                 datetime.timezone.utc).isoformat()},
+        )
         for item in prepared:
             frame_attempts: list[dict[str, Any]] = []
             attempts_log.append({
@@ -1312,6 +1385,33 @@ class FirstPassRunner:
             "frames_unprocessed": 0,
         }
         self._check_prior_state(paths["state"], prepared)
+        expected_spans: dict[str, list[int]] = {}
+        for begin in range(0, len(prepared), cfg.batch_size):
+            expected = prepared[begin:begin + cfg.batch_size]
+            expected_spans[
+                f"batch_{expected[0].frame.frame_index:08d}-"
+                f"{expected[-1].frame.frame_index:08d}"
+            ] = [item.frame.frame_index for item in expected]
+        uncertain_map = self._scan_uncertain(
+            paths["checkpoints"].parent, completed,
+            expected_spans)
+        uncertain_frames = sorted({
+            frame for span in uncertain_map.values()
+            for frame in span})
+        if uncertain_map and (
+                cfg.uncertain_policy == UNCERTAIN_REFUSE):
+            batches = sorted(uncertain_map)
+            raise FirstPassError(
+                "UNCERTAIN_REQUESTS",
+                f"{len(uncertain_frames)} frame(s) in "
+                f"{len(batches)} batch(es) lack verified "
+                f"outcomes ({', '.join(batches)}); refusing "
+                f"automatic replay (uncertain_policy=refuse). "
+                f"Resolve explicitly: inspect the batch files, "
+                f"then re-run with uncertain_policy='rerun' "
+                f"only after confirming replay is safe.",
+                batches[0],
+            )
         for start in range(0, len(prepared), cfg.batch_size):
             span = prepared[start:start + cfg.batch_size]
             stats["batches_total"] += 1
@@ -1333,18 +1433,29 @@ class FirstPassRunner:
                         "different frame set.",
                         batch_id,
                     )
-                if record.get("status") == "completed":
+                status = record.get("status")
+                if status == "completed":
                     continue
-                if record.get("status") == "budget_stopped":
-                    prior = self._load_prior_batch(
-                        paths, record)
-                    done = set(prior["completed"])
-                    span = [item for item in span
-                            if item.frame.frame_index
-                            not in done]
-                    if not span:
-                        stats["batches_completed"] += 1
-                        continue
+                if status not in (
+                        "budget_stopped", "needs_human_review"):
+                    raise FirstPassError(
+                        "CHECKPOINT_MISMATCH",
+                        f"Batch {batch_id} has unrecognized "
+                        f"checkpoint status {status!r}; "
+                        f"refusing resume.",
+                        batch_id,
+                    )
+                prior = self._load_prior_batch(paths, record)
+                fresh = (set(prior["completed"])
+                         - ledger.prior_completed)
+                ledger.prior_observed += len(fresh)
+                ledger.prior_completed.update(fresh)
+                done = set(prior["completed"])
+                span = [item for item in span
+                        if item.frame.frame_index not in done]
+                if not span:
+                    stats["batches_completed"] += 1
+                    continue
             batch_result = self._run_batch(
                 client, span, batch_id, prompt_digest,
                 cfg.api_key, rng, paths, policy,
@@ -1381,7 +1492,8 @@ class FirstPassRunner:
             [item.frame.frame_index for item in prepared])
         stats["frames_unprocessed"] = len(remaining)
         return self._write_report(
-            paths, stats, prepared, ledger, remaining)
+            paths, stats, prepared, ledger, remaining,
+            uncertain_frames)
 
     def _check_prior_state(
             self, state_path: Path,
@@ -1408,10 +1520,14 @@ class FirstPassRunner:
     def _load_prior_batch(self, paths: dict[str, Path],
                           record: dict[str, Any]
                           ) -> dict[str, Any]:
-        """Load partial batch outputs for a budget-stopped resume.
+        """Load partial batch outputs for a partial-batch resume.
 
-        Missing or malformed partials fail closed: resuming
-        onto vanished evidence would silently drop billed work.
+        Serves budget-stopped and review-required batches: the
+        observation files on disk are the ground truth for
+        which frames completed, so known-good requests are
+        never re-submitted. Missing or malformed partials fail
+        closed: resuming onto vanished evidence would silently
+        drop billed work.
         """
         batch_id = record.get("batch_id", "?")
         try:
@@ -1422,18 +1538,83 @@ class FirstPassRunner:
         except (OSError, ValueError, KeyError,
                 TypeError) as exc:
             raise FirstPassError(
-                "CHECKPOINT_MISMATCH",
+                "CHECKPOINT_CORRUPT",
                 f"Batch {batch_id} partial outputs are missing "
                 f"or unreadable; refusing resume.",
                 str(batch_id),
             ) from exc
         if not isinstance(raw, list) or not isinstance(obs, list):
             raise FirstPassError(
-                "CHECKPOINT_MISMATCH",
+                "CHECKPOINT_CORRUPT",
                 f"Batch {batch_id} partial outputs are "
                 f"malformed; refusing resume.",
                 str(batch_id),
             )
+        observed: list[int] = []
+        for item in obs:
+            frame = item.get("frame_index") if isinstance(
+                item, dict) else None
+            if (not isinstance(frame, int)
+                    or isinstance(frame, bool)):
+                raise FirstPassError(
+                    "CHECKPOINT_CORRUPT",
+                    f"Batch {batch_id} observations are "
+                    f"malformed; refusing resume.",
+                    str(batch_id),
+                )
+            observed.append(frame)
+        claimed = record.get("completed_frame_indices")
+        if claimed is not None and (
+                not isinstance(claimed, list)
+                or any(not isinstance(frame, int)
+                       or isinstance(frame, bool)
+                       for frame in claimed)
+                or sorted(claimed) != sorted(observed)):
+            raise FirstPassError(
+                "CHECKPOINT_CORRUPT",
+                f"Batch {batch_id} checkpoint disagrees with "
+                f"its observation files; refusing resume.",
+                str(batch_id),
+            )
+        attempts = record.get("attempts", [])
+        if not isinstance(attempts, list):
+            raise FirstPassError(
+                "CHECKPOINT_CORRUPT",
+                f"Batch {batch_id} attempt log is malformed; "
+                f"refusing resume.",
+                str(batch_id),
+            )
+        prior_input = record.get("input_tokens", 0)
+        prior_output = record.get("output_tokens", 0)
+        if (not isinstance(prior_input, int)
+                or isinstance(prior_input, bool)
+                or not isinstance(prior_output, int)
+                or isinstance(prior_output, bool)):
+            raise FirstPassError(
+                "CHECKPOINT_CORRUPT",
+                f"Batch {batch_id} token totals are "
+                f"malformed; refusing resume.",
+                str(batch_id),
+            )
+        prior_budget = record.get("budget", {})
+        if not isinstance(prior_budget, dict):
+            raise FirstPassError(
+                "CHECKPOINT_CORRUPT",
+                f"Batch {batch_id} budget block is "
+                f"malformed; refusing resume.",
+                str(batch_id),
+            )
+        for key in ("requests_submitted", "cost_known_usd_estimate",
+                    "cost_unknown_requests"):
+            value = prior_budget.get(key, 0)
+            if (not isinstance(value, (int, float))
+                    or isinstance(value, bool) or value < 0):
+                raise FirstPassError(
+                    "CHECKPOINT_CORRUPT",
+                    f"Batch {batch_id} budget block is "
+                    f"malformed; refusing resume.",
+                    str(batch_id),
+                )
         full = record.get("frame_indices", [])
         if not isinstance(full, list) or not full:
             raise FirstPassError(
@@ -1442,26 +1623,88 @@ class FirstPassRunner:
                 f"span; refusing resume.",
                 str(batch_id),
             )
-        index_range = record.get("index_range") or [
-            full[0], full[-1]]
+        index_range = record.get("index_range")
+        if (not isinstance(index_range, list)
+                or len(index_range) != 2
+                or any(not isinstance(bound, int)
+                       or isinstance(bound, bool)
+                       for bound in index_range)):
+            raise FirstPassError(
+                "CHECKPOINT_CORRUPT",
+                f"Batch {batch_id} index range is malformed; "
+                f"refusing resume.",
+                str(batch_id),
+            )
         return {
             "raw": raw,
             "obs": obs,
-            "attempts": list(record.get("attempts", [])),
-            "input_tokens": record.get("input_tokens", 0),
-            "output_tokens": record.get("output_tokens", 0),
-            "budget": record.get("budget", {}),
-            "completed": list(
-                record.get("completed_frame_indices", [])),
+            "attempts": list(attempts),
+            "input_tokens": prior_input,
+            "output_tokens": prior_output,
+            "budget": prior_budget,
+            "completed": observed,
             "frame_indices": list(full),
             "index_range": list(index_range),
         }
+
+    def _scan_uncertain(
+            self, checkpoints_dir: Path,
+            index: dict[str, Any],
+            expected: dict[str, list[int]]) -> dict[str, list[int]]:
+        """Map started-but-uncheckpointed batches to their spans.
+
+        A start marker without a checkpoint record means the
+        batch may have submitted requests whose outcomes were
+        never durably recorded. Markers for unknown or changed
+        spans fail closed instead of being silently dropped.
+        """
+        uncertain: dict[str, list[int]] = {}
+        pattern = f"{MARKER_PREFIX}*{MARKER_SUFFIX}"
+        for marker_path in sorted(checkpoints_dir.glob(pattern)):
+            try:
+                marker = json.loads(
+                    marker_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise FirstPassError(
+                    "CHECKPOINT_CORRUPT",
+                    "Batch start marker is unreadable: "
+                    f"{marker_path.name}.",
+                    marker_path.name,
+                ) from exc
+            batch_id = marker.get("batch_id") if isinstance(
+                marker, dict) else None
+            span = marker.get("frame_indices") if isinstance(
+                marker, dict) else None
+            if (not isinstance(batch_id, str) or not batch_id
+                    or not isinstance(span, list) or not span
+                    or any(not isinstance(frame, int)
+                           or isinstance(frame, bool)
+                           for frame in span)):
+                raise FirstPassError(
+                    "CHECKPOINT_CORRUPT",
+                    "Batch start marker is malformed: "
+                    f"{marker_path.name}.",
+                    marker_path.name,
+                )
+            if batch_id in index:
+                continue
+            current = expected.get(batch_id)
+            if current is None or set(span) - set(current):
+                raise FirstPassError(
+                    "CHECKPOINT_MISMATCH",
+                    f"Uncertain batch {batch_id} does not match "
+                    f"the current frame set; refusing resume.",
+                    batch_id,
+                )
+            uncertain[batch_id] = list(span)
+        return uncertain
 
     def _write_report(self, paths: dict[str, Path],
                       stats: dict[str, Any],
                       prepared: list[_PreparedFrame],
                       ledger: _BudgetLedger,
-                      remaining: list[int]
+                      remaining: list[int],
+                      uncertain: list[int]
                       ) -> dict[str, Any]:
         cfg = self._config
         rates = cfg.rates_usd_per_m
@@ -1528,7 +1771,8 @@ class FirstPassRunner:
                 rates,
             ),
         }
-        state["budget"] = ledger.report_block(remaining)
+        state["budget"] = ledger.report_block(
+            remaining, uncertain)
         _write_json(paths["state"], state)
         _write_json(paths["reports"] / "run_report.json", state)
         return state

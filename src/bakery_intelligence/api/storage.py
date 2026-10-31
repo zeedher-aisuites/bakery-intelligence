@@ -21,6 +21,7 @@ SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
 SOURCES_DIRNAME = "sources"
 RUNS_DIRNAME = "runs"
 ARTIFACTS_DIRNAME = "artifacts"
+WORK_DIRNAME = "work"
 
 
 class StorageError(Exception):
@@ -102,6 +103,17 @@ class StorageBackend(ABC):
     def read_artifact(self, run_id: str, artifact_id: str) -> bytes:
         """Read a run artifact fully into memory."""
 
+    @abstractmethod
+    def run_work_dir(self, run_id: str) -> Path:
+        """Return the durable run-scoped work directory, creating it.
+
+        Worker progress that must survive process restarts lives
+        here: staged inputs, extracted frames, inference
+        checkpoints, and resume state. It sits outside the
+        artifacts namespace, so work files are never publicly
+        listed or served as run artifacts.
+        """
+
 
 class LocalStorageBackend(StorageBackend):
     """Filesystem storage rooted at a dedicated base directory."""
@@ -163,3 +175,9 @@ class LocalStorageBackend(StorageBackend):
             raise ObjectNotFoundError(
                 f"Artifact not found: {run_id}/{artifact_id}.")
         return path.read_bytes()
+
+    def run_work_dir(self, run_id: str) -> Path:
+        validate_run_id(run_id)
+        directory = self._base / RUNS_DIRNAME / run_id / WORK_DIRNAME
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory

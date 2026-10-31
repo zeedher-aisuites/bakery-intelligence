@@ -10,6 +10,7 @@ invocation. See ``experiments/008_modal_volumes_spike/PROCEDURE.md``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import BinaryIO
 
 from bakery_intelligence.api.storage import StorageBackend, StorageError
@@ -53,4 +54,7 @@ class ModalStorageBackend(StorageBackend):
         raise self._unavailable()
 
     def read_artifact(self, run_id: str, artifact_id: str) -> bytes:
+        raise self._unavailable()
+
+    def run_work_dir(self, run_id: str) -> Path:
         raise self._unavailable()

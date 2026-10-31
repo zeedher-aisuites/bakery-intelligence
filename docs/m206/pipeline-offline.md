@@ -1,13 +1,16 @@
 # M2-06C.4 offline video pipeline
 
-Status: implemented, awaiting host-side verification.
+Status: implemented, host-verified through M2-06C.5/S1; S2
+durable recovery implemented, awaiting host-side verification.
 Entirely offline: no model is queried and no network is used.
 
 ## 1. Workflow
 
 `video_pipeline_offline` accepts one small uploaded video
 (max 16 MB, enforced by both the API cap and the worker) and
-runs, inside one worker claim over a temporary directory:
+runs, inside one worker claim over a durable run-scoped
+work directory (`runs/<run_id>/work`, outside the public
+artifacts namespace):
 
 1. Integrity-checked staging (`video.intake`, content hash).
 2. Frame extraction at 1 FPS over the full window
@@ -22,13 +25,37 @@ runs, inside one worker claim over a temporary directory:
 5. Deterministic reconstruction through the shared
    `offline.run_bundle_reconstruction` core.
 
-Intermediates (staged copy, frames, first-pass files) live in
-the temp directory and vanish with it, including on failure.
-Only completed runs persist artifacts: the five
-reconstruction files plus `firstpass_report.json` and
+Intermediates (staged copy, frames, first-pass files,
+`pipeline_state.json`) persist in the work directory across
+worker restarts. Only completed runs publish artifacts: the
+five reconstruction files plus `firstpass_report.json` and
 `pipeline_summary.json`.
 
-## 2. Honesty contract
+## 2. Durable recovery (S2)
+
+Stage transitions record atomically in `pipeline_state.json`
+(`pipeline-workdir/1`): source identity, video metadata,
+extraction fingerprint (sampling, frame list, manifest and
+per-frame hashes, sidecar hash), the effective first-pass
+configuration, and the stage (`extracted`,
+`firstpass_running`, `firstpass_done`).
+
+A restarted worker verifies the state fingerprint against
+its live inputs and resumes instead of restarting:
+verified extraction outputs are reused, the first-pass
+runner resumes from its own checkpoints (completed requests
+are never re-submitted; uncertain batches follow the
+offline rerun policy), and reconstruction re-runs
+deterministically. Any fingerprint mismatch, missing or
+changed frame, altered report, or unknown stage fails the
+job explicitly (`PipelineResumeError`, never silently
+retried) instead of restarting onto doubt. The summary
+records whether the run resumed (`resumed`); first-pass
+counts in the summary are lifetime totals derived from
+durable files, while `firstpass_report.json` keeps the
+per-attempt report with its prior/current budget split.
+
+## 3. Honesty contract
 
 - The workflow name, the summary (`synthetic_inference:
   true`, fake model/provider ids, three false flags), the
@@ -48,13 +75,16 @@ reconstruction files plus `firstpass_report.json` and
   vary across upload names while all reconstructed values
   stay identical (asserted exactly by test).
 
-## 3. Lifecycle and limits
+## 4. Lifecycle and limits
 
 - Synchronous single-claim execution; artifacts store only
-  on success, so no partial sets exist. Crashes requeue and
-  re-run idempotently under bound 2; explicit failures
-  never retry. The bound must be re-evaluated before any
-  paid stage joins this workflow name.
+  on success, so no partial sets exist. A daemon thread
+  refreshes the claim heartbeat while the executor runs,
+  so slow jobs are not mistaken for crashed workers.
+  Crashes requeue under bound 2 and the next attempt
+  resumes verified progress; explicit failures never retry.
+  The bound must be re-evaluated before any paid stage
+  joins this workflow name.
 - Fixed worker settings in C.4: 1 FPS, full window,
   batch size 5, 16 MB video cap, 1000-frame cap. The
   underlying functions accept configuration; worker-level
@@ -64,7 +94,7 @@ reconstruction files plus `firstpass_report.json` and
   field). The console gained a radio option and renders
   pipeline results through the existing review section.
 
-## 4. Verification status
+## 5. Verification status
 
 Implemented and statically reviewed; Python is unavailable in
 the agent sandbox, so the Python suite was authored but not
@@ -80,11 +110,12 @@ git diff --check
 git status --short
 ```
 
-## 5. Limitations
+## 6. Limitations and crash windows
 
-- Failed-frame placeholder timestamps inherit the
-  reconstruction `frame/50` fallback, which mislabels
-  non-50 FPS videos (existing semantics, unchanged).
+- Missing-observation timestamps use the measured source
+  frame rate carried through the bundle (S0); the legacy
+  50 FPS divisor applies only when the source rate is
+  genuinely unknown (bundles without `source_fps`).
 - JPEG bytes depend on the OpenCV build; selection,
   metadata, and fake outputs do not.
 - No multi-gigabyte intake, no live client, no
@@ -92,3 +123,20 @@ git status --short
 - Review UI shows pipeline drafts through the offline
   results view; pipeline-specific sections await later
   milestones.
+- Crash windows (all fail safe, none silent): a crash
+  before the state file exists restarts the free
+  stage/extract stages; a crash mid-batch leaves that
+  batch uncertain (offline reruns it, bounded by one
+  batch; a paid future must refuse and resolve
+  explicitly); files written without their checkpoint
+  are superseded on rerun, with the replayed frames
+  named in the first-pass report. Durability covers
+  process crashes; OS-level crashes may need fsync
+  hardening (not implemented).
+- Work directories are retained after completion for
+  audit; no automatic cleanup exists yet. A second
+  worker claiming the same job past the stale
+  threshold while the first still runs would share
+  one work directory; heartbeats make that require a
+  genuinely stalled worker, and single-worker
+  deployments never hit it.

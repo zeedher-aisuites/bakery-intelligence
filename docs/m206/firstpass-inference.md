@@ -45,13 +45,28 @@ authorization boundary; a missing factory fails closed.
   records with null fields, never manufactured successes.
 - Checkpoints append JSONL per batch (with exact frame lists);
   run state and the final report write atomically. Resume skips
-  `completed` batches; `needs_human_review` batches re-run as a
-  unit (re-submitting their known-good requests, as in 006).
-  Budget-halted batches checkpoint as `budget_stopped` with
-  their partial outputs and resume on the remainder only, so
-  completed frames are never re-submitted. Reusing a directory
-  for a different frame set fails closed
-  (`CHECKPOINT_MISMATCH`) instead of mixing outputs.
+  `completed` batches; `needs_human_review` and
+  `budget_stopped` batches resume on their unobserved
+  remainder only, merging prior outputs, so completed
+  requests are never re-submitted (the frozen 006
+  experiment keeps its own re-run-as-a-unit rule).
+  Unrecognized checkpoint statuses fail closed instead of
+  re-running blindly. Reusing a directory for a different
+  frame set fails closed (`CHECKPOINT_MISMATCH`) instead
+  of mixing outputs.
+- Crash recovery (S2): every batch attempt writes an atomic
+  start marker; a marker without a checkpoint record means
+  the batch is uncertain (requests may have been submitted
+  without durably recorded outcomes). The
+  `uncertain_policy` decides: `rerun` (default, for free
+  deterministic clients) re-attempts uncertain batches and
+  names the replayed frames in the report; `refuse`
+  (required for paid use) fails closed with
+  `UNCERTAIN_REQUESTS` for explicit operator resolution.
+  A torn final checkpoint line is truncated and its batch
+  resumes as uncertain; malformed content ahead of more
+  content, unreadable partials, and checkpoint/file
+  disagreements fail closed (`CHECKPOINT_CORRUPT`).
 - Request/cost guardrails (S1, all optional, off by default):
   `max_requests` caps submitted requests exactly (retries and
   escalations included); `cost_ceiling_usd` halts further
@@ -112,8 +127,14 @@ strict unknown-cost halts, poisoned-vs-known spend splits,
 zero-ceiling overrun semantics, superseded-usage spend
 inclusion, resume accounting with partial-batch merge,
 pre-S1 checkpoint reconstruction, invalid-limit rejection,
-and vacuous strict-without-ceiling behavior. Crash
-safety beyond tested resume is not claimed.
+and vacuous strict-without-ceiling behavior, and the S2
+recovery rules: selective review-batch resume with exact
+accounting seeding, unknown-status refusal, torn-tail
+truncation, mid-file corruption refusal, uncertain
+rerun/refuse policies, invalid-policy rejection, missing
+and disagreeing partials refusal, and pre-S1 review
+compatibility. Crash safety beyond tested resume is not
+claimed.
 
 ## 5. P04 compatibility
 
@@ -148,19 +169,20 @@ Report whether the recorded-replay test ran or skipped.
 
 - No live client, ingestion, extraction, worker wiring, UI,
   or cloud support (later milestones).
-- `needs_human_review` batches re-submit known-good requests
-  on resume; acceptable offline, cost-relevant when live.
-  Their prior submits do not seed the S1 ledger (S1 seeds
-  only batches that will not re-run), so a resumed review
-  batch spends fresh budget on already-billed frames; the
-  re-spend is counted, never hidden.
+- `needs_human_review` batches resume only their unobserved
+  frames and seed their recorded counters exactly, so no
+  known-good request is re-submitted and no budget is
+  reset; only genuinely failed frames are re-attempted.
 - A crash between submit and batch checkpoint leaves that
-  batch's spend outside every checkpoint, so a later resume
-  cannot account for it; strict cross-process durability is
-  S2 scope, explicitly not claimed here.
+  batch uncertain at batch granularity: its submits are
+  invisible to the resumed ledger, so the offline policy
+  reruns the whole batch (bounded waste of at most one
+  batch, explicitly reported) while a paid policy must
+  refuse. Per-request journaling does not exist.
 - Pre-S1 checkpoints seed request counts exactly but cost
   only from batch token totals, flagged
-  `reconstructed_from_token_totals`.
+  `reconstructed_from_token_totals`; pre-S1 review
+  batches resume selectively via an observation-file scan.
 - Strict mode cannot prevent a first-request overrun: with
   rates known it dispatches (input cost unknowable
   pre-request) and halts after detection; only unknown

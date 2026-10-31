@@ -87,3 +87,22 @@ def test_modal_placeholder_never_touches_network(tmp_path: Path) -> None:
         backend.artifact_exists("run_0123456789ab", "r.json")
     with pytest.raises(ModalNotConfiguredError):
         backend.read_artifact("run_0123456789ab", "r.json")
+    with pytest.raises(ModalNotConfiguredError):
+        backend.run_work_dir("run_0123456789ab")
+
+
+def test_run_work_dir_created_and_namespaced(tmp_path: Path) -> None:
+    backend = LocalStorageBackend(tmp_path)
+    run_id = "run_0123456789ab"
+    path = backend.run_work_dir(run_id)
+    assert path == tmp_path / "runs" / run_id / "work"
+    assert path.is_dir()
+    assert backend.run_work_dir(run_id) == path
+    (path / "progress.json").write_bytes(b"{}")
+    assert not backend.artifact_exists(run_id, "progress.json")
+    with pytest.raises(ObjectNotFoundError):
+        backend.read_artifact(run_id, "progress.json")
+    assert LocalStorageBackend(tmp_path).run_work_dir(
+        run_id).is_dir()
+    with pytest.raises(InvalidObjectIdError):
+        backend.run_work_dir("bogus")

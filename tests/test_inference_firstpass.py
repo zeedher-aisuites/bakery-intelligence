@@ -1135,3 +1135,269 @@ def test_capped_run_completing_under_budget(
     assert report["budget"]["remaining_frame_indices"] == []
     assert report["budget"]["spent_cost_usd_estimate"] == 90.0
     assert report["budget"]["cost_unknown_requests"] == 0
+
+
+# Durable checkpoints and safe recovery (M2-06C.5/S2) --------------------
+
+
+class _CrashingClient:
+    """Fake client that dies once, simulating a worker crash."""
+
+    def __init__(self, crash_on: int,
+                 usage: InferenceUsage | None = None) -> None:
+        self.crash_on = crash_on
+        self.usage = usage or InferenceUsage(10, 20, 30)
+        self.calls: list[int] = []
+        self.crashed = False
+
+    def submit(self, prompt_text: str, image_paths: list[Path],
+               api_key: str, max_output_tokens: int
+               ) -> InferenceResponse:
+        _ = (prompt_text, api_key, max_output_tokens)
+        index = int(Path(image_paths[0]).stem.split("_")[1])
+        self.calls.append(index)
+        if index == self.crash_on and not self.crashed:
+            self.crashed = True
+            raise RuntimeError("simulated worker crash")
+        return _ok(usage=self.usage)
+
+
+def test_review_batch_resumes_only_unobserved_frames(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 3)
+    out_dir = tmp_path / "run"
+    first = _FakeClient(
+        script={2: [InferenceError("BAD_REQUEST", "nope")]},
+        default=_ok())
+    partial = FirstPassRunner(_config(
+        frames, out_dir, first, batch_size=5)).run()
+    assert partial["batches_needing_review"] == 1
+    assert sorted(_obs_index(out_dir)) == [1, 3]
+    records = _checkpoints(out_dir)
+    assert records[0]["status"] == "needs_human_review"
+    second = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, out_dir, second, batch_size=5)).run()
+    assert _call_indices(second) == [2]
+    assert sorted(_obs_index(out_dir)) == [1, 2, 3]
+    assert report["batches_needing_review"] == 0
+    assert report["batches_completed"] == 1
+    budget = report["budget"]
+    assert budget["requests_submitted"] == 1
+    assert budget["prior_requests_submitted"] == 3
+    assert budget["prior_cost_basis"] == "recorded"
+    merged = _read_json(out_dir / "observations"
+                        / "batch_00000001-00000003.json")
+    assert sorted(
+        item["frame_index"] for item in merged) == [1, 2, 3]
+    records = _checkpoints(out_dir)
+    assert records[-1]["status"] == "completed"
+    assert sorted(
+        records[-1]["completed_frame_indices"]) == [1, 2, 3]
+    assert records[-1]["budget"]["requests_submitted"] == 4
+
+
+def test_unknown_checkpoint_status_refused(
+        tmp_path: Path) -> None:
+    out_dir = tmp_path / "run"
+    checkpoints = out_dir / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    (checkpoints / "checkpoints.jsonl").write_text(
+        json.dumps({"batch_id": "batch_00000001-00000002",
+                    "frame_indices": [1, 2],
+                    "status": "mystery"}) + "\n",
+        encoding="utf-8")
+    frames = _seq_frames(tmp_path, 2)
+    fake = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, out_dir, fake, batch_size=5)).run()
+    assert caught.value.code == "CHECKPOINT_MISMATCH"
+    assert "mystery" in caught.value.message
+    assert fake.calls == []
+
+
+def test_torn_checkpoint_tail_truncated(tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    out_dir = tmp_path / "run"
+    first = _FakeClient(default=_ok())
+    FirstPassRunner(_config(
+        frames, out_dir, first, batch_size=2)).run()
+    log = out_dir / "checkpoints" / "checkpoints.jsonl"
+    before = log.read_bytes()
+    log.write_bytes(before + b'{"batch_id": "batch_0000000')
+    second = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, out_dir, second, batch_size=2)).run()
+    assert second.calls == []
+    assert report["frames_total"] == 4
+    assert log.read_bytes() == before
+
+
+def test_midfile_checkpoint_corruption_refused(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    out_dir = tmp_path / "run"
+    first = _FakeClient(default=_ok())
+    FirstPassRunner(_config(
+        frames, out_dir, first, batch_size=2)).run()
+    log = out_dir / "checkpoints" / "checkpoints.jsonl"
+    lines = log.read_bytes().strip().split(b"\n")
+    assert len(lines) == 2
+    log.write_bytes(
+        b"\n".join([lines[0], b"NOT JSON AT ALL", lines[1]])
+        + b"\n")
+    second = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, out_dir, second, batch_size=2)).run()
+    assert caught.value.code == "CHECKPOINT_CORRUPT"
+    assert second.calls == []
+
+
+def test_uncertain_refuse_policy_blocks_replay(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    out_dir = tmp_path / "run"
+    crashing = _CrashingClient(crash_on=3)
+    with pytest.raises(RuntimeError, match="simulated worker"):
+        FirstPassRunner(_config(
+            frames, out_dir, crashing, batch_size=2)).run()
+    assert crashing.calls == [1, 2, 3]
+    cautious = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, out_dir, cautious, batch_size=2,
+            uncertain_policy="refuse")).run()
+    assert caught.value.code == "UNCERTAIN_REQUESTS"
+    assert "batch_00000003-00000004" in caught.value.message
+    assert cautious.calls == []
+
+
+def test_uncertain_rerun_reports_replayed_frames(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    out_dir = tmp_path / "run"
+    crashing = _CrashingClient(crash_on=3)
+    with pytest.raises(RuntimeError, match="simulated worker"):
+        FirstPassRunner(_config(
+            frames, out_dir, crashing, batch_size=2)).run()
+    second = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, out_dir, second, batch_size=2)).run()
+    assert _call_indices(second) == [3, 4]
+    assert sorted(_obs_index(out_dir)) == [1, 2, 3, 4]
+    budget = report["budget"]
+    assert budget["uncertain_frame_indices"] == [3, 4]
+    assert budget["uncertain_policy"] == "rerun"
+    assert budget["prior_requests_submitted"] == 2
+    assert budget["requests_submitted"] == 2
+    assert budget["stopped_reason"] is None
+    assert budget["remaining_frame_indices"] == []
+
+
+@pytest.mark.parametrize("policy", ["sometimes", "", None, True])
+def test_invalid_uncertain_policy_rejected(
+        tmp_path: Path, policy: Any) -> None:
+    frames = _seq_frames(tmp_path, 1)
+    fake = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, tmp_path / "run", fake,
+            uncertain_policy=policy)).run()
+    assert caught.value.code == "INVALID_CONFIG"
+    assert fake.calls == []
+
+
+def test_missing_partial_files_refused(tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 3)
+    out_dir = tmp_path / "run"
+    first = _FakeClient(
+        script={2: [InferenceError("BAD_REQUEST", "nope")]},
+        default=_ok())
+    FirstPassRunner(_config(
+        frames, out_dir, first, batch_size=5)).run()
+    (out_dir / "observations"
+     / "batch_00000001-00000003.json").unlink()
+    second = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, out_dir, second, batch_size=5)).run()
+    assert caught.value.code == "CHECKPOINT_CORRUPT"
+    assert second.calls == []
+
+
+def test_checkpoint_observation_disagreement_refused(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 3)
+    out_dir = tmp_path / "run"
+    first = _FakeClient(
+        script={2: [InferenceError("BAD_REQUEST", "nope")]},
+        default=_ok())
+    FirstPassRunner(_config(
+        frames, out_dir, first, batch_size=5)).run()
+    log = out_dir / "checkpoints" / "checkpoints.jsonl"
+    record = json.loads(log.read_text(encoding="utf-8").strip())
+    record["completed_frame_indices"] = [1]
+    log.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    second = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, out_dir, second, batch_size=5)).run()
+    assert caught.value.code == "CHECKPOINT_CORRUPT"
+    assert second.calls == []
+
+
+def test_legacy_review_checkpoint_resumes_selectively(
+        tmp_path: Path) -> None:
+    out_dir = tmp_path / "run"
+    checkpoints = out_dir / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    obs_dir = out_dir / "observations"
+    obs_dir.mkdir(parents=True)
+    raw_dir = out_dir / "raw_responses"
+    raw_dir.mkdir(parents=True)
+    batch = "batch_00000001-00000003"
+    legacy = {
+        "attempts": [
+            {"attempts": [{"attempt": 1, "budget": 1024,
+                            "code": "ok"}],
+             "frame_indices": [1]},
+            {"attempts": [{"attempt": 1, "budget": 1024,
+                            "code": "BAD_REQUEST"}],
+             "frame_indices": [2]},
+            {"attempts": [{"attempt": 1, "budget": 1024,
+                            "code": "ok"}],
+             "frame_indices": [3]},
+        ],
+        "batch_id": batch,
+        "frame_indices": [1, 2, 3],
+        "index_range": [1, 3],
+        "input_tokens": 20,
+        "obs_path": f"{batch}.json",
+        "output_tokens": 40,
+        "raw_path": f"{batch}.json",
+        "status": "needs_human_review",
+    }
+    (checkpoints / "checkpoints.jsonl").write_text(
+        json.dumps(legacy) + "\n", encoding="utf-8")
+    (obs_dir / f"{batch}.json").write_text(json.dumps([
+        {"frame_index": 1, "terminal_state": "valid_prediction"},
+        {"frame_index": 3, "terminal_state": "valid_prediction"},
+    ]), encoding="utf-8")
+    (raw_dir / f"{batch}.json").write_text(
+        json.dumps([]), encoding="utf-8")
+    frames = _seq_frames(tmp_path, 3)
+    fake = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, out_dir, fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES)).run()
+    assert _call_indices(fake) == [2]
+    assert sorted(_obs_index(out_dir)) == [1, 2, 3]
+    budget = report["budget"]
+    assert budget["prior_requests_submitted"] == 3
+    assert budget["requests_submitted"] == 1
+    assert budget["prior_cost_basis"] == (
+        "reconstructed_from_token_totals")
+    assert budget["prior_spent_cost_known_usd_estimate"] == 60.0
+    assert budget["prior_frames_observed"] == 2
