@@ -1,0 +1,286 @@
+:root {
+  --cream: #faf6ee;
+  --oat: #ede3d3;
+  --card: #fffefb;
+  --caramel: #b77743;
+  --caramel-dark: #8a5a2b;
+  --espresso: #352a25;
+  --muted: #6f6259;
+  --sage: #718674;
+  --sage-bg: #dce5dc;
+  --line: #e2d5be;
+  --alert-bg: #f5d9d2;
+  --alert-fg: #7a2e22;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--cream);
+  color: var(--espresso);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+}
+
+.page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 2.5rem;
+}
+
+.masthead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 1.6rem;
+  letter-spacing: 0.01em;
+}
+
+.subtitle {
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 760px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.1rem 1.2rem;
+}
+
+.card h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1.05rem;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.field {
+  display: block;
+  margin: 0.8rem 0;
+  font-size: 0.9rem;
+}
+
+.field input {
+  display: block;
+  margin-top: 0.35rem;
+}
+
+.selection {
+  font-size: 0.9rem;
+}
+
+button.primary {
+  background: var(--caramel);
+  border: 1px solid var(--caramel);
+  color: #fffefb;
+  border-radius: 8px;
+  padding: 0.55rem 1rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+button.primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.primary:not(:disabled):hover {
+  background: var(--caramel-dark);
+}
+
+button.ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--espresso);
+  border-radius: 8px;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+}
+
+.error {
+  color: var(--alert-fg);
+  background: var(--alert-bg);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.9rem;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.3rem 0.8rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.artifact-row {
+  display: contents;
+}
+
+code {
+  font-family: Consolas, "Cascadia Code", monospace;
+  font-size: 0.85em;
+}
+
+.hash {
+  font-size: 0.75em;
+}
+
+.pill {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  padding: 0.15rem 0.65rem;
+}
+
+.pill-ok,
+.pill-completed {
+  background: var(--sage-bg);
+  color: #3e5642;
+}
+
+.pill-bad,
+.pill-failed {
+  background: var(--alert-bg);
+  color: var(--alert-fg);
+}
+
+.pill-pending,
+.pill-queued,
+.pill-running {
+  background: var(--oat);
+  color: #5a4a3e;
+}
+
+.badge-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.footnote {
+  margin-top: 1.25rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+a {
+  color: var(--caramel-dark);
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+.card h3 {
+  margin: 1.1rem 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+.radio-group {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 0.8rem 0;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.9rem;
+}
+
+.radio-group legend {
+  padding: 0 0.4rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.radio-group label {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin: 0.4rem 0;
+}
+
+.flag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.4rem 0 0.6rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin: 0.4rem 0;
+}
+
+.grid-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.grid-table th,
+.grid-table td {
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.grid-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.plain-list {
+  margin: 0.4rem 0;
+  padding-left: 1.2rem;
+  font-size: 0.9rem;
+}
+
+.plain-list li {
+  margin: 0.3rem 0;
+}
+
+.step {
+  border-top: 1px solid var(--line);
+  padding: 0.4rem 0;
+}
+
+.step p {
+  margin: 0.3rem 0;
+  font-size: 0.9rem;
+}

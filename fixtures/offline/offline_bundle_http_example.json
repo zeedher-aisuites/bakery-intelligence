@@ -1,0 +1,174 @@
+{
+  "bundle_format": "bakery-offline-bundle/1",
+  "video_id": "SYNTH.HTTP.001",
+  "event_id": "scale_visibility_http",
+  "draft_version": 1,
+  "source_dataset": "synthetic-fixture",
+  "window": null,
+  "observations": [
+    {
+      "frame_index": 7400,
+      "image_path": "frame_00007400.jpg",
+      "timestamp_seconds": 148.0,
+      "batch_id": "batch_http",
+      "model_fields": {
+        "scale_display_verbatim": "353",
+        "scale_readable": true,
+        "scale_state": "stable",
+        "tare_action_visible": false,
+        "addition_or_removal_visible": "addition",
+        "confidence": "high"
+      }
+    },
+    {
+      "frame_index": 7450,
+      "image_path": "frame_00007450.jpg",
+      "timestamp_seconds": 149.0,
+      "batch_id": "batch_http",
+      "model_fields": {
+        "scale_display_verbatim": "421",
+        "scale_readable": true,
+        "scale_state": "stable",
+        "tare_action_visible": false,
+        "addition_or_removal_visible": "addition",
+        "confidence": "high"
+      }
+    },
+    {
+      "frame_index": 7500,
+      "image_path": "frame_00007500.jpg",
+      "timestamp_seconds": 150.0,
+      "batch_id": "batch_http",
+      "model_fields": {
+        "scale_display_verbatim": "5 15",
+        "scale_readable": true,
+        "scale_state": "stable",
+        "tare_action_visible": false,
+        "addition_or_removal_visible": "addition",
+        "confidence": "high"
+      }
+    },
+    {
+      "frame_index": 7550,
+      "image_path": "frame_00007550.jpg",
+      "timestamp_seconds": 151.0,
+      "batch_id": "batch_http",
+      "model_fields": {
+        "scale_display_verbatim": "575",
+        "scale_readable": true,
+        "scale_state": "stable",
+        "tare_action_visible": false,
+        "addition_or_removal_visible": "addition",
+        "confidence": "high"
+      }
+    },
+    {
+      "frame_index": 7600,
+      "image_path": "frame_00007600.jpg",
+      "timestamp_seconds": 152.0,
+      "batch_id": "batch_http",
+      "model_fields": {
+        "scale_display_verbatim": "643",
+        "scale_readable": true,
+        "scale_state": "stable",
+        "tare_action_visible": false,
+        "addition_or_removal_visible": "addition",
+        "confidence": "high"
+      }
+    }
+  ],
+  "temporal": {
+    "artifact_version": "1.1.0",
+    "events": [
+      {
+        "event_id": "scale_visibility_http",
+        "candidate_type": "scale_visibility",
+        "start_timestamp_seconds": 148.0,
+        "end_timestamp_seconds": 152.0,
+        "verification_status": "needs_review",
+        "frame_indices": [7400, 7450, 7500, 7550, 7600],
+        "review_reasons": ["temporal_inconsistency"],
+        "uncertainty_notes": []
+      },
+      {
+        "event_id": "action_addition_http",
+        "candidate_type": "action_addition",
+        "start_timestamp_seconds": 148.0,
+        "end_timestamp_seconds": 152.0,
+        "verification_status": "candidate",
+        "frame_indices": [7400, 7450, 7500, 7550, 7600],
+        "review_reasons": [],
+        "uncertainty_notes": []
+      }
+    ]
+  },
+  "execution_reports": [
+    {
+      "event_id": "scale_visibility_http",
+      "terminal_state": "valid_prediction",
+      "selected_readings": [
+        {
+          "timestamp_seconds": 148.0,
+          "display_text": "353",
+          "numeric_value": 353.0,
+          "readable": true,
+          "confidence": "high",
+          "uncertainty_notes": null
+        },
+        {
+          "timestamp_seconds": 149.0,
+          "display_text": "421",
+          "numeric_value": 421.0,
+          "readable": true,
+          "confidence": "high",
+          "uncertainty_notes": null
+        },
+        {
+          "timestamp_seconds": 150.0,
+          "display_text": "515",
+          "numeric_value": 515.0,
+          "readable": true,
+          "confidence": "high",
+          "uncertainty_notes": null
+        },
+        {
+          "timestamp_seconds": 151.0,
+          "display_text": "575",
+          "numeric_value": 575.0,
+          "readable": true,
+          "confidence": "high",
+          "uncertainty_notes": null
+        },
+        {
+          "timestamp_seconds": 152.0,
+          "display_text": "643",
+          "numeric_value": 643.0,
+          "readable": true,
+          "confidence": "high",
+          "uncertainty_notes": null
+        }
+      ]
+    }
+  ],
+  "units": {
+    "sidecar_version": "1.0.0",
+    "assignments": [
+      {
+        "assignment_id": "ua_0001",
+        "unit": "g",
+        "unit_kind": "mass",
+        "scope_type": "event_window",
+        "event_id": "scale_visibility_http",
+        "start_seconds": 148.0,
+        "end_seconds": 152.0,
+        "source": "human",
+        "reviewer": "m2-06b1b-http-check",
+        "justification": null,
+        "revision": 1,
+        "previous_assignment_id": null,
+        "status": "active",
+        "note": null
+      }
+    ]
+  }
+}
