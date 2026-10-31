@@ -11,7 +11,8 @@ first-pass multimodal analysis over an explicit frame list.
 Configuration supplies frames (`frame_index`, `image_path`,
 timestamps), a source integrity anchor, the model name, prompt
 text, batching, token budgets, retry policy, an optional rate
-pair, and a client factory. The client seam is the
+pair, optional request/cost guardrails (S1), and a client
+factory. The client seam is the
 `InferenceClient` protocol — `submit(prompt, images, key,
 max_output_tokens)` returning a normalized response — modeled
 on `MetaClient.submit`, except the token budget travels as an
@@ -46,8 +47,28 @@ authorization boundary; a missing factory fails closed.
   run state and the final report write atomically. Resume skips
   `completed` batches; `needs_human_review` batches re-run as a
   unit (re-submitting their known-good requests, as in 006).
-  Reusing a directory for a different frame set fails closed
+  Budget-halted batches checkpoint as `budget_stopped` with
+  their partial outputs and resume on the remainder only, so
+  completed frames are never re-submitted. Reusing a directory
+  for a different frame set fails closed
   (`CHECKPOINT_MISMATCH`) instead of mixing outputs.
+- Request/cost guardrails (S1, all optional, off by default):
+  `max_requests` caps submitted requests exactly (retries and
+  escalations included); `cost_ceiling_usd` halts further
+  spend once known spend exceeds it; `strict_cost` additionally
+  halts on the first unknown-cost submit. Every submit without
+  usable usage counts as unknown cost, never as zero, and
+  unknown totals poison the reported estimate while the known
+  part stays visible. Halts record a stable reason, the
+  remaining frame indices, and split this-run/prior counters;
+  nothing is silently discarded. Resume seeds its accounting
+  from checkpoints (recorded blocks preferred, pre-S1 token
+  totals reconstructed and labeled as such), so limits apply
+  to lifetime totals. The pre-dispatch cost reserve is a
+  heuristic (largest observed single-request estimate):
+  input tokens are unknowable before dispatch, so overruns
+  are detected after the fact, never prevented outright;
+  the report states this gap explicitly.
 - Observation records carry the 006 key set (frame identity,
   three timestamps, basis, source anchor, batch/pass ids,
   call provenance, model fields, parse diagnostics, lifecycle
@@ -84,7 +105,14 @@ and recovery, exhausted budgets, all terminal classes,
 partial-batch reporting, resume without re-calling completed
 batches (asserted on the fake call log), refusal to resume a
 different frame set, provenance fields,
-cost known/unknown reporting, and PNG acceptance. Crash
+cost known/unknown reporting, PNG acceptance, and the S1
+guardrails: request-cap halts (including zero, retries, and
+exact completion), reserve and overrun ceiling halts,
+strict unknown-cost halts, poisoned-vs-known spend splits,
+zero-ceiling overrun semantics, superseded-usage spend
+inclusion, resume accounting with partial-batch merge,
+pre-S1 checkpoint reconstruction, invalid-limit rejection,
+and vacuous strict-without-ceiling behavior. Crash
 safety beyond tested resume is not claimed.
 
 ## 5. P04 compatibility
@@ -122,5 +150,20 @@ Report whether the recorded-replay test ran or skipped.
   or cloud support (later milestones).
 - `needs_human_review` batches re-submit known-good requests
   on resume; acceptable offline, cost-relevant when live.
+  Their prior submits do not seed the S1 ledger (S1 seeds
+  only batches that will not re-run), so a resumed review
+  batch spends fresh budget on already-billed frames; the
+  re-spend is counted, never hidden.
+- A crash between submit and batch checkpoint leaves that
+  batch's spend outside every checkpoint, so a later resume
+  cannot account for it; strict cross-process durability is
+  S2 scope, explicitly not claimed here.
+- Pre-S1 checkpoints seed request counts exactly but cost
+  only from batch token totals, flagged
+  `reconstructed_from_token_totals`.
+- Strict mode cannot prevent a first-request overrun: with
+  rates known it dispatches (input cost unknowable
+  pre-request) and halts after detection; only unknown
+  costs halt before further spend.
 - Mirrored 006 policy can drift from the frozen experiment;
   the replay test guards shapes, not future 006 edits.

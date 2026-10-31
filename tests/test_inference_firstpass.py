@@ -3,8 +3,8 @@
 A scripted fake client stands in for the provider seam: no
 network, no credentials, no paid calls. Covers ordering,
 batching, retries, budget escalation, partial failures, resume,
-provenance, and structural compatibility with recorded P04
-outputs.
+provenance, request/cost guardrails (M2-06C.5/S1), and
+structural compatibility with recorded P04 outputs.
 """
 
 from __future__ import annotations
@@ -598,3 +598,540 @@ def test_recorded_raw_replay_matches_observation_shape(
                 "valid_prediction", "abstained")
     assert set(recorded[raw_groups[0]["frame_indices"][0]][
         "model_fields"]) <= set(MODEL_OUTPUT_FIELDS)
+
+
+# Request and cost budget guardrails (M2-06C.5/S1) ----------------------
+
+# One dollar per token in each direction, so estimates stay
+# exact and readable ($30 for the standard 10/20 usage).
+DOLLAR_RATES = (1_000_000.0, 1_000_000.0)
+DOLLAR_USAGE = InferenceUsage(10, 20, 30)
+
+
+def _seq_frames(tmp_path: Path, count: int = 4) -> list[FrameRef]:
+    return [_frame(tmp_path / "frames", index, float(index))
+            for index in range(1, count + 1)]
+
+
+def _call_indices(fake: _FakeClient) -> list[int]:
+    return sorted(
+        int(Path(call[1][0]).stem.split("_")[1])
+        for call in fake.calls)
+
+
+def _checkpoints(out_dir: Path) -> list[dict[str, Any]]:
+    text = (out_dir / "checkpoints" / "checkpoints.jsonl"
+            ).read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+    return [json.loads(line) for line in text.split("\n")]
+
+
+def test_request_limit_stops_before_next_request(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    fake = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        max_requests=2)).run()
+    assert len(fake.calls) == 2
+    assert _call_indices(fake) == [1, 2]
+    assert report["frames_observed"] == 2
+    assert report["frames_failed"] == 0
+    assert report["frames_unprocessed"] == 2
+    assert report["batches_total"] == 1
+    assert report["batches_completed"] == 0
+    assert report["batches_needing_review"] == 0
+    assert report["stopped_reason"] == "request_limit_reached"
+    budget = report["budget"]
+    assert budget["max_requests"] == 2
+    assert budget["requests_submitted"] == 2
+    assert budget["prior_requests_submitted"] == 0
+    assert budget["stopped_reason"] == "request_limit_reached"
+    assert budget["stopped_detail"] == {
+        "requests_submitted": 2, "max_requests": 2}
+    assert budget["remaining_frame_indices"] == [3, 4]
+    assert sorted(_obs_index(tmp_path / "run")) == [1, 2]
+    records = _checkpoints(tmp_path / "run")
+    assert len(records) == 1
+    assert records[0]["status"] == "budget_stopped"
+    assert records[0]["frame_indices"] == [1, 2, 3, 4]
+    assert records[0]["completed_frame_indices"] == [1, 2]
+    assert records[0]["budget"]["requests_submitted"] == 2
+
+
+def test_request_limit_zero_submits_nothing(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    fake = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        max_requests=0)).run()
+    assert fake.calls == []
+    assert report["frames_observed"] == 0
+    assert report["frames_failed"] == 0
+    assert report["frames_unprocessed"] == 4
+    budget = report["budget"]
+    assert budget["stopped_reason"] == "request_limit_reached"
+    assert budget["stopped_detail"] == {
+        "requests_submitted": 0, "max_requests": 0}
+    assert budget["remaining_frame_indices"] == [1, 2, 3, 4]
+    assert _obs_index(tmp_path / "run") == {}
+    records = _checkpoints(tmp_path / "run")
+    assert len(records) == 1
+    assert records[0]["status"] == "budget_stopped"
+    assert records[0]["completed_frame_indices"] == []
+
+
+def test_retry_attempts_consume_request_budget(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 2)
+    fake = _FakeClient(
+        script={1: [InferenceError("TIMEOUT", "slow"), _ok()]},
+        default=_ok())
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        max_requests=2)).run()
+    assert len(fake.calls) == 2
+    assert _call_indices(fake) == [1, 1]
+    assert report["retries"] == 1
+    assert report["frames_observed"] == 1
+    assert report["frames_unprocessed"] == 1
+    assert report["stopped_reason"] == "request_limit_reached"
+    assert report["budget"]["remaining_frame_indices"] == [2]
+
+
+def test_request_limit_exact_completion(tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 2)
+    fake = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        max_requests=2)).run()
+    assert len(fake.calls) == 2
+    assert report["frames_observed"] == 2
+    assert report["frames_unprocessed"] == 0
+    assert report["stopped_reason"] is None
+    assert report["budget"]["remaining_frame_indices"] == []
+    records = _checkpoints(tmp_path / "run")
+    assert records[0]["status"] == "completed"
+
+
+def test_cost_ceiling_pre_dispatch_reserve_halts(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    fake = _FakeClient(
+        default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES,
+        cost_ceiling_usd=75.0)).run()
+    assert len(fake.calls) == 2
+    assert sorted(_obs_index(tmp_path / "run")) == [1, 2]
+    budget = report["budget"]
+    assert budget["stopped_reason"] == "cost_reserve_exceeded"
+    assert budget["stopped_detail"] == {
+        "spent_known_usd": 60.0,
+        "reserve_usd_estimate": 30.0,
+        "reserve_basis": "max_observed_single_request_estimate",
+        "cost_ceiling_usd": 75.0,
+    }
+    assert budget["spent_cost_usd_estimate"] == 60.0
+    assert budget["cost_unknown_requests"] == 0
+    assert budget["remaining_frame_indices"] == [3, 4]
+    assert report["frames_unprocessed"] == 2
+
+
+def test_cost_ceiling_post_response_overrun_halts(
+        tmp_path: Path) -> None:
+    small = InferenceUsage(4, 6, 10)
+    big = InferenceUsage(40, 60, 100)
+    frames = _seq_frames(tmp_path)
+    fake = _FakeClient(
+        script={1: [_ok(usage=small)],
+                2: [_ok(usage=big)]},
+        default=_ok(usage=small))
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES,
+        cost_ceiling_usd=50.0)).run()
+    assert len(fake.calls) == 2
+    # The overrunning response is billed work: its
+    # observation is kept, and only later frames remain.
+    assert sorted(_obs_index(tmp_path / "run")) == [1, 2]
+    budget = report["budget"]
+    assert budget["stopped_reason"] == "cost_ceiling_exceeded"
+    assert budget["stopped_detail"] == {
+        "phase": "post_response",
+        "spent_known_usd": 110.0,
+        "cost_ceiling_usd": 50.0,
+    }
+    assert budget["spent_cost_usd_estimate"] == 110.0
+    assert budget["remaining_frame_indices"] == [3, 4]
+
+
+def test_unknown_cost_non_strict_continues(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 3)
+    fake = _FakeClient(
+        script={2: [_ok(usage=InferenceUsage())]},
+        default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES,
+        cost_ceiling_usd=1000.0)).run()
+    assert len(fake.calls) == 3
+    assert report["stopped_reason"] is None
+    assert report["frames_observed"] == 3
+    budget = report["budget"]
+    assert budget["cost_unknown_requests"] == 1
+    assert budget["spent_cost_usd_estimate"] is None
+    assert budget["spent_cost_known_usd_estimate"] == 60.0
+    assert budget["remaining_frame_indices"] == []
+
+
+def test_unknown_cost_strict_halts(tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 3)
+    fake = _FakeClient(
+        script={2: [_ok(usage=InferenceUsage())]},
+        default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES,
+        cost_ceiling_usd=1000.0, strict_cost=True)).run()
+    assert len(fake.calls) == 2
+    assert sorted(_obs_index(tmp_path / "run")) == [1, 2]
+    budget = report["budget"]
+    assert budget["stopped_reason"] == "unknown_cost_strict_halt"
+    assert budget["stopped_detail"] == {
+        "phase": "post_response",
+        "cause": "usage_unreported",
+        "cost_unknown_requests": 1,
+        "cost_ceiling_usd": 1000.0,
+    }
+    assert budget["spent_cost_usd_estimate"] is None
+    assert budget["spent_cost_known_usd_estimate"] == 30.0
+    assert budget["remaining_frame_indices"] == [3]
+
+
+def test_strict_without_rates_refuses_dispatch(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 2)
+    fake = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        cost_ceiling_usd=100.0, strict_cost=True)).run()
+    assert fake.calls == []
+    assert report["frames_observed"] == 0
+    budget = report["budget"]
+    assert budget["stopped_reason"] == "unknown_cost_strict_halt"
+    assert budget["stopped_detail"] == {
+        "phase": "pre_dispatch",
+        "cause": "rates_unknown",
+        "cost_ceiling_usd": 100.0,
+    }
+    assert budget["remaining_frame_indices"] == [1, 2]
+
+
+def test_strict_transport_failure_halts(tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 3)
+    fake = _FakeClient(
+        script={1: [InferenceError("BAD_REQUEST", "nope")]},
+        default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES,
+        cost_ceiling_usd=1000.0, strict_cost=True)).run()
+    assert len(fake.calls) == 1
+    assert report["frames_observed"] == 0
+    assert report["frames_failed"] == 1
+    assert report["frames_unprocessed"] == 2
+    budget = report["budget"]
+    assert budget["stopped_reason"] == "unknown_cost_strict_halt"
+    assert budget["stopped_detail"] == {
+        "phase": "transport",
+        "cause": "transport_failure_without_usage",
+        "cost_unknown_requests": 1,
+        "cost_ceiling_usd": 1000.0,
+    }
+    assert budget["remaining_frame_indices"] == [2, 3]
+    raw = _read_json(tmp_path / "run" / "raw_responses"
+                     / "batch_00000001-00000003.json")
+    assert raw == []
+    records = _checkpoints(tmp_path / "run")
+    tries = records[0]["attempts"][0]["attempts"]
+    assert [entry["code"] for entry in tries] == ["BAD_REQUEST"]
+
+
+def test_transport_failure_counts_unknown_cost(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 3)
+    fake = _FakeClient(
+        script={1: [InferenceError("BAD_REQUEST", "nope")]},
+        default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES,
+        cost_ceiling_usd=1000.0)).run()
+    assert len(fake.calls) == 3
+    assert report["stopped_reason"] is None
+    assert report["frames_failed"] == 1
+    assert report["lifecycle"]["terminal_states"] == {
+        "request_failed": 1, "valid_prediction": 2}
+    budget = report["budget"]
+    assert budget["cost_unknown_requests"] == 1
+    assert budget["spent_cost_usd_estimate"] is None
+    assert budget["spent_cost_known_usd_estimate"] == 60.0
+
+
+def test_ceiling_zero_non_strict_reports_overrun(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 2)
+    fake = _FakeClient(default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES,
+        cost_ceiling_usd=0.0)).run()
+    assert len(fake.calls) == 1
+    assert sorted(_obs_index(tmp_path / "run")) == [1]
+    budget = report["budget"]
+    assert budget["stopped_reason"] == "cost_ceiling_exceeded"
+    assert budget["stopped_detail"] == {
+        "phase": "post_response",
+        "spent_known_usd": 30.0,
+        "cost_ceiling_usd": 0.0,
+    }
+    assert budget["remaining_frame_indices"] == [2]
+
+
+def test_resume_preserves_request_accounting(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    out_dir = tmp_path / "run"
+    first = _FakeClient(default=_ok())
+    capped = FirstPassRunner(_config(
+        frames, out_dir, first, batch_size=2,
+        max_requests=2)).run()
+    assert _call_indices(first) == [1, 2]
+    assert capped["stopped_reason"] == "request_limit_reached"
+    assert capped["budget"]["remaining_frame_indices"] == [3, 4]
+    second = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, out_dir, second, batch_size=2,
+        max_requests=4)).run()
+    assert _call_indices(second) == [3, 4]
+    assert report["stopped_reason"] is None
+    assert report["budget"]["remaining_frame_indices"] == []
+    budget = report["budget"]
+    assert budget["requests_submitted"] == 2
+    assert budget["prior_requests_submitted"] == 2
+    assert budget["prior_cost_basis"] == "recorded"
+    assert budget["prior_frames_observed"] == 2
+    assert sorted(_obs_index(out_dir)) == [1, 2, 3, 4]
+    merged = _read_json(out_dir / "observations"
+                        / "batch_00000003-00000004.json")
+    assert [item["frame_index"] for item in merged] == [3, 4]
+    records = _checkpoints(out_dir)
+    assert len(records) == 3
+    assert records[-1]["status"] == "completed"
+    assert records[-1]["frame_indices"] == [3, 4]
+
+
+def test_resume_enforces_cost_ceiling_on_lifetime_total(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path)
+    out_dir = tmp_path / "run"
+    base = {"batch_size": 5, "rates_usd_per_m": DOLLAR_RATES}
+    first = _FakeClient(default=_ok(usage=DOLLAR_USAGE))
+    capped = FirstPassRunner(_config(
+        frames, out_dir, first, cost_ceiling_usd=75.0,
+        **base)).run()
+    assert _call_indices(first) == [1, 2]
+    assert capped["stopped_reason"] == "cost_reserve_exceeded"
+    stalled = _FakeClient(default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, out_dir, stalled, cost_ceiling_usd=75.0,
+        **base)).run()
+    assert stalled.calls == []
+    assert report["stopped_reason"] == "cost_reserve_exceeded"
+    assert report["budget"]["prior_spent_cost_known_usd_estimate"
+                 ] == 60.0
+    assert report["budget"]["remaining_frame_indices"] == [3, 4]
+    raised = _FakeClient(default=_ok(usage=DOLLAR_USAGE))
+    final = FirstPassRunner(_config(
+        frames, out_dir, raised, cost_ceiling_usd=200.0,
+        **base)).run()
+    assert _call_indices(raised) == [3, 4]
+    assert final["stopped_reason"] is None
+    assert final["budget"]["remaining_frame_indices"] == []
+    assert final["budget"]["requests_submitted"] == 2
+    assert final["budget"]["prior_requests_submitted"] == 2
+    assert final["budget"]["spent_cost_known_usd_estimate"
+                 ] == 60.0
+    assert final["budget"]["prior_spent_cost_known_usd_estimate"
+                 ] == 60.0
+    assert final["budget"]["prior_cost_basis"] == "recorded"
+    assert sorted(_obs_index(out_dir)) == [1, 2, 3, 4]
+    merged = _read_json(out_dir / "observations"
+                        / "batch_00000001-00000004.json")
+    assert [item["frame_index"] for item in merged] == [1, 2, 3, 4]
+    records = _checkpoints(out_dir)
+    assert records[-1]["status"] == "completed"
+    assert records[-1]["completed_frame_indices"] == [1, 2, 3, 4]
+    assert records[-1]["budget"]["requests_submitted"] == 4
+
+
+def test_old_checkpoints_seed_reconstructed_basis(
+        tmp_path: Path) -> None:
+    out_dir = tmp_path / "run"
+    checkpoints = out_dir / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    legacy = {
+        "attempts": [
+            {"attempts": [{"attempt": 1, "budget": 1024,
+                            "code": "ok"}],
+             "frame_indices": [1]},
+            {"attempts": [{"attempt": 1, "budget": 1024,
+                            "code": "ok"}],
+             "frame_indices": [2]},
+        ],
+        "batch_id": "batch_00000001-00000002",
+        "frame_indices": [1, 2],
+        "index_range": [1, 2],
+        "input_tokens": 20,
+        "obs_path": "batch_00000001-00000002.json",
+        "output_tokens": 40,
+        "raw_path": "batch_00000001-00000002.json",
+        "status": "completed",
+    }
+    (checkpoints / "checkpoints.jsonl").write_text(
+        json.dumps(legacy) + "\n", encoding="utf-8")
+    frames = _seq_frames(tmp_path)
+    fake = _FakeClient(default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, out_dir, fake, batch_size=2,
+        rates_usd_per_m=DOLLAR_RATES,
+        max_requests=3)).run()
+    assert _call_indices(fake) == [3]
+    assert report["stopped_reason"] == "request_limit_reached"
+    budget = report["budget"]
+    assert budget["requests_submitted"] == 1
+    assert budget["prior_requests_submitted"] == 2
+    assert budget["prior_cost_basis"] == (
+        "reconstructed_from_token_totals")
+    assert budget["prior_spent_cost_known_usd_estimate"] == 60.0
+    assert budget["prior_spent_cost_usd_estimate"] == 60.0
+    assert budget["prior_frames_observed"] == 2
+    assert budget["remaining_frame_indices"] == [4]
+
+
+def test_default_run_has_no_budget_limits(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 2)
+    fake = _FakeClient(default=_ok())
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5)).run()
+    budget = report["budget"]
+    assert budget["max_requests"] is None
+    assert budget["cost_ceiling_usd"] is None
+    assert budget["strict_cost"] is False
+    assert budget["requests_submitted"] == 2
+    assert budget["prior_requests_submitted"] == 0
+    assert budget["stopped_reason"] is None
+    assert budget["remaining_frame_indices"] == []
+    assert budget["cost_unknown_requests"] == 2
+    assert budget["spent_cost_usd_estimate"] is None
+    rated = FirstPassRunner(_config(
+        _seq_frames(tmp_path, 2), tmp_path / "rated",
+        _FakeClient(default=_ok(usage=DOLLAR_USAGE)),
+        batch_size=5, rates_usd_per_m=DOLLAR_RATES)).run()
+    assert rated["budget"]["cost_unknown_requests"] == 0
+    assert rated["budget"]["spent_cost_usd_estimate"] == 60.0
+
+
+@pytest.mark.parametrize("overrides", [
+    {"max_requests": -1},
+    {"max_requests": True},
+    {"max_requests": 2.0},
+    {"max_requests": "2"},
+    {"max_requests": float("nan")},
+    {"cost_ceiling_usd": -1.0},
+    {"cost_ceiling_usd": True},
+    {"cost_ceiling_usd": "10"},
+    {"cost_ceiling_usd": float("nan")},
+    {"cost_ceiling_usd": float("inf")},
+    {"cost_ceiling_usd": float("-inf")},
+    {"strict_cost": 1},
+    {"strict_cost": "yes"},
+    {"strict_cost": None},
+])
+def test_invalid_budget_limits_rejected(
+        tmp_path: Path, overrides: dict[str, Any]) -> None:
+    frames = _seq_frames(tmp_path, 1)
+    fake = _FakeClient(default=_ok())
+    with pytest.raises(FirstPassError) as caught:
+        FirstPassRunner(_config(
+            frames, tmp_path / "run", fake,
+            **overrides)).run()
+    assert caught.value.code == "INVALID_CONFIG"
+    assert fake.calls == []
+
+
+def test_strict_without_ceiling_is_vacuous(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 2)
+    fake = _FakeClient(
+        script={1: [InferenceError("BAD_REQUEST", "nope")]},
+        default=_ok())
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        strict_cost=True)).run()
+    assert len(fake.calls) == 2
+    assert report["stopped_reason"] is None
+    assert report["frames_failed"] == 1
+    assert report["frames_observed"] == 1
+    # Both submits lack calculable cost for different reasons:
+    # the failed transport reports no usage, and the success
+    # reports usage but no rates are configured. Neither is
+    # treated as zero.
+    assert report["budget"]["cost_unknown_requests"] == 2
+    assert report["budget"]["spent_cost_usd_estimate"] is None
+    assert report["budget"]["spent_cost_known_usd_estimate"] == 0.0
+    assert report["budget"]["remaining_frame_indices"] == []
+
+
+def test_superseded_usage_counts_toward_spend(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 1)
+    fake = _FakeClient(script={1: [
+        _ok("", InferenceUsage(5, 5, 10),
+            status="incomplete",
+            incomplete_reason="max_output_tokens reached"),
+        _ok(usage=DOLLAR_USAGE),
+    ]})
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake,
+        token_budgets=(1024, 2048),
+        rates_usd_per_m=DOLLAR_RATES)).run()
+    assert fake.budgets == [1024, 2048]
+    budget = report["budget"]
+    assert budget["requests_submitted"] == 2
+    assert budget["spent_cost_known_usd_estimate"] == 40.0
+    assert budget["spent_cost_usd_estimate"] == 40.0
+    assert budget["cost_unknown_requests"] == 0
+    assert report["cost_usd_estimated"] == 30.0
+
+
+def test_capped_run_completing_under_budget(
+        tmp_path: Path) -> None:
+    frames = _seq_frames(tmp_path, 3)
+    fake = _FakeClient(default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, tmp_path / "run", fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES, max_requests=10,
+        cost_ceiling_usd=1000.0, strict_cost=True)).run()
+    assert len(fake.calls) == 3
+    assert report["stopped_reason"] is None
+    assert report["frames_observed"] == 3
+    assert report["budget"]["remaining_frame_indices"] == []
+    assert report["budget"]["spent_cost_usd_estimate"] == 90.0
+    assert report["budget"]["cost_unknown_requests"] == 0

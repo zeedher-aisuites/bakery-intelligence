@@ -14,12 +14,18 @@ and wires no live client — inference flows only through an
 injected client factory, so automated tests run fully offline.
 Live provider wiring arrives with the C.5 authorization
 boundary, not here.
+
+Budget guardrails (S1): an optional request cap and cost
+ceiling bound each run. Stops are explicit outcomes recorded
+in the report, never silent truncation; resume seeds its
+accounting from checkpoints instead of resetting it.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 import time
 from collections.abc import Callable, Sequence
@@ -73,6 +79,19 @@ RETRYABLE_CODES = frozenset({
     "RATE_LIMITED", "TIMEOUT", "NETWORK_ERROR", "SERVER_ERROR",
 })
 ABORT_CODES = frozenset({"CREDENTIAL_MISSING", "AUTH_FAILED"})
+
+# Budget-halt reasons (S1). Recorded verbatim in reports and
+# checkpoints; treat as stable vocabulary.
+STOP_REQUEST_LIMIT = "request_limit_reached"
+STOP_COST_CEILING = "cost_ceiling_exceeded"
+STOP_COST_RESERVE = "cost_reserve_exceeded"
+STOP_STRICT_UNKNOWN_COST = "unknown_cost_strict_halt"
+
+# Reserve heuristic label. The pre-dispatch reserve projects
+# the next request at the largest single-request estimate seen
+# so far; input tokens are unknowable before dispatch, so this
+# is explicitly not a guarantee (see the ledger).
+RESERVE_BASIS_OBSERVED_MAX = "max_observed_single_request_estimate"
 
 DEFAULT_BATCH_SIZE = 5
 DEFAULT_MAX_ATTEMPTS = 4
@@ -139,6 +158,16 @@ class InferenceResponse:
     latency_seconds: float = 0.0
     request_id: str | None = None
     incomplete_reason: str | None = None
+
+
+class _BudgetHalt(Exception):
+    """Internal budget-stop signal (never escapes the runner)."""
+
+    def __init__(self, reason: str,
+                 detail: dict[str, Any]) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
 
 
 class InferenceClient(Protocol):
@@ -211,6 +240,9 @@ class FirstPassConfig:
     backoff_cap_seconds: float = DEFAULT_BACKOFF_CAP_SECONDS
     jitter_seed: int = DEFAULT_JITTER_SEED
     rates_usd_per_m: tuple[float, float] | None = None
+    max_requests: int | None = None
+    cost_ceiling_usd: float | None = None
+    strict_cost: bool = False
     api_key: str = ""
     client_factory: Callable[[], InferenceClient] | None = None
     sleeper: Callable[[float], None] = time.sleep
@@ -230,6 +262,360 @@ class BudgetPolicy:
             raise ValueError(
                 "budgets must be a non-empty tuple of positive ints."
             )
+
+
+def _validate_budget_config(config: FirstPassConfig) -> None:
+    """Reject malformed request/cost limits before any request.
+
+    Zero is a valid limit (it simply allows no submits or no
+    spend); negative, non-finite, and mistyped limits are
+    configuration defects, never silently coerced.
+    """
+    limit = config.max_requests
+    if limit is not None and (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit < 0):
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "max_requests must be a non-negative int or None, "
+            f"got {limit!r}.")
+    ceiling = config.cost_ceiling_usd
+    if ceiling is not None and (
+            isinstance(ceiling, bool)
+            or not isinstance(ceiling, (int, float))
+            or not math.isfinite(ceiling)
+            or ceiling < 0):
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "cost_ceiling_usd must be a non-negative finite "
+            f"number or None, got {ceiling!r}.")
+    if not isinstance(config.strict_cost, bool):
+        raise FirstPassError(
+            "INVALID_CONFIG",
+            "strict_cost must be a bool, "
+            f"got {config.strict_cost!r}.")
+
+
+@dataclass
+class _BudgetLedger:
+    """Per-run request/cost accounting with enforcement (S1).
+
+    Every submitted request counts exactly once, including
+    transport retries and token-budget escalations. Known
+    spend sums per-request estimates from reported usage;
+    submits without usable usage count as unknown cost, never
+    as zero. Unknown totals poison the reported estimate
+    (mirroring 007 ``aggregate_spent``) while the known part
+    stays available as the enforcement basis.
+
+    Resume seeds the prior counters from checkpoints, so
+    enforcement applies to lifetime totals rather than a
+    reset zero. Only records for batches that will not
+    re-run seed accounting; batches that re-run as a unit
+    count their new submits fresh (the known 006 re-spend).
+
+    Guarantees and gaps: the request cap is exact — no
+    submit leaves after it trips. The cost ceiling halts
+    further spend once known spend exceeds it, but input
+    tokens are unknowable before dispatch, so the
+    pre-dispatch reserve is a heuristic (largest observed
+    single-request estimate), not a bound; overruns are
+    detected after the fact. Strict mode additionally
+    halts on the first unknown-cost submit instead of
+    continuing blind. ``run_manifest.BudgetState`` is not
+    reused here because it cannot represent unknown spend.
+    """
+
+    max_requests: int | None
+    ceiling: float | None
+    strict: bool
+    rates: tuple[float, float] | None
+    prior_requests: int = 0
+    prior_spent: float = 0.0
+    prior_unknown: int = 0
+    prior_max_single: float | None = None
+    prior_completed: set[int] = field(default_factory=set)
+    prior_observed: int = 0
+    prior_basis: str = "none"
+    rates_changed: bool = False
+    requests: int = 0
+    spent: float = 0.0
+    unknown: int = 0
+    max_single: float | None = None
+    attempted: set[int] = field(default_factory=set)
+    stopped_reason: str | None = None
+    stopped_detail: dict[str, Any] | None = None
+    batch_requests: int = 0
+    batch_spent: float = 0.0
+    batch_unknown: int = 0
+    batch_max_single: float | None = None
+
+    def begin_batch(self) -> None:
+        """Reset per-batch counters (checkpoint deltas)."""
+        self.batch_requests = 0
+        self.batch_spent = 0.0
+        self.batch_unknown = 0
+        self.batch_max_single = None
+
+    @property
+    def total_requests(self) -> int:
+        """Submits across prior and current invocations."""
+        return self.prior_requests + self.requests
+
+    @property
+    def total_spent(self) -> float:
+        """Known spend across invocations, rounded for dust."""
+        return round(self.prior_spent + self.spent, 4)
+
+    @property
+    def total_unknown(self) -> int:
+        """Unknown-cost submits across invocations."""
+        return self.prior_unknown + self.unknown
+
+    @property
+    def reserve(self) -> float | None:
+        """Largest single-request estimate seen, if any."""
+        candidates = [value for value in
+                      (self.prior_max_single, self.max_single)
+                      if value is not None]
+        return max(candidates) if candidates else None
+
+    def halt(self, reason: str,
+             detail: dict[str, Any]) -> None:
+        """Record the first halt; later halts keep it."""
+        if self.stopped_reason is None:
+            self.stopped_reason = reason
+            self.stopped_detail = detail
+
+    def pre_dispatch(self) -> tuple[str, dict[str, Any]] | None:
+        """Veto the next submit when a limit already trips.
+
+        Exact checks first (request count, known spend,
+        strict unknowability), heuristic reserve last.
+        Returns None when dispatch is allowed.
+        """
+        if (self.max_requests is not None
+                and self.total_requests >= self.max_requests):
+            return STOP_REQUEST_LIMIT, {
+                "requests_submitted": self.total_requests,
+                "max_requests": self.max_requests,
+            }
+        if (self.ceiling is not None
+                and self.total_spent > self.ceiling):
+            return STOP_COST_CEILING, {
+                "phase": "pre_dispatch",
+                "spent_known_usd": self.total_spent,
+                "cost_ceiling_usd": self.ceiling,
+            }
+        if (self.strict and self.ceiling is not None
+                and self.rates is None):
+            return STOP_STRICT_UNKNOWN_COST, {
+                "phase": "pre_dispatch",
+                "cause": "rates_unknown",
+                "cost_ceiling_usd": self.ceiling,
+            }
+        reserve = self.reserve
+        if (self.ceiling is not None and self.rates is not None
+                and reserve is not None
+                and self.total_spent + reserve > self.ceiling):
+            return STOP_COST_RESERVE, {
+                "spent_known_usd": self.total_spent,
+                "reserve_usd_estimate": reserve,
+                "reserve_basis": RESERVE_BASIS_OBSERVED_MAX,
+                "cost_ceiling_usd": self.ceiling,
+            }
+        return None
+
+    def note_submitted(self, frame_index: int) -> None:
+        """Count one submit leaving for a frame."""
+        self.requests += 1
+        self.batch_requests += 1
+        self.attempted.add(frame_index)
+
+    def note_transport_failure(self) -> bool:
+        """Account a submit without usage; True when halting.
+
+        A failed transport may or may not have been billed,
+        so its cost is unknown rather than zero.
+        """
+        self.unknown += 1
+        self.batch_unknown += 1
+        if self.strict and self.ceiling is not None:
+            self.halt(STOP_STRICT_UNKNOWN_COST, {
+                "phase": "transport",
+                "cause": "transport_failure_without_usage",
+                "cost_unknown_requests": self.total_unknown,
+                "cost_ceiling_usd": self.ceiling,
+            })
+            return True
+        return False
+
+    def note_usages(self, pairs: list[tuple[Any, Any]]) -> bool:
+        """Account billed attempts in order; True when halting.
+
+        Each pair is one submitted request's (input, output)
+        token report, oldest first. Unusable reports count as
+        unknown cost; known estimates accumulate toward the
+        ceiling with an overrun check after each addition.
+        Every pair is accounted even when an early pair
+        trips a halt, so halting never hides known spend;
+        the recorded reason stays the first trigger.
+        """
+        tripped = False
+        for input_tokens, output_tokens in pairs:
+            estimate = estimate_cost(
+                input_tokens, output_tokens, self.rates)
+            if estimate is None:
+                self.unknown += 1
+                self.batch_unknown += 1
+                if self.strict and self.ceiling is not None:
+                    self.halt(STOP_STRICT_UNKNOWN_COST, {
+                        "phase": "post_response",
+                        "cause": "usage_unreported",
+                        "cost_unknown_requests": (
+                            self.total_unknown),
+                        "cost_ceiling_usd": self.ceiling,
+                    })
+                    tripped = True
+                continue
+            self.spent += estimate
+            self.batch_spent += estimate
+            if (self.max_single is None
+                    or estimate > self.max_single):
+                self.max_single = estimate
+            if (self.batch_max_single is None
+                    or estimate > self.batch_max_single):
+                self.batch_max_single = estimate
+            if (self.ceiling is not None
+                    and self.total_spent > self.ceiling):
+                self.halt(STOP_COST_CEILING, {
+                    "phase": "post_response",
+                    "spent_known_usd": self.total_spent,
+                    "cost_ceiling_usd": self.ceiling,
+                })
+                tripped = True
+        return tripped
+
+    def remaining(self, ordered: list[int]) -> list[int]:
+        """Frames never attempted in any invocation, in order."""
+        return [index for index in ordered
+                if index not in self.prior_completed
+                and index not in self.attempted]
+
+    def report_block(
+            self, remaining: list[int]) -> dict[str, Any]:
+        """Assemble the additive budget report section."""
+        spent = round(self.spent, 4)
+        prior_spent = round(self.prior_spent, 4)
+        if self.prior_unknown:
+            prior_estimate = None
+        elif (self.prior_basis in (
+                "reconstructed_from_token_totals", "mixed")
+                and self.rates is None
+                and self.prior_requests):
+            prior_estimate = None
+        else:
+            prior_estimate = prior_spent
+        return {
+            "max_requests": self.max_requests,
+            "requests_submitted": self.requests,
+            "prior_requests_submitted": self.prior_requests,
+            "cost_ceiling_usd": self.ceiling,
+            "currency": "USD",
+            "rates_usd_per_m": (
+                list(self.rates)
+                if self.rates is not None else None),
+            "strict_cost": self.strict,
+            "spent_cost_usd_estimate": (
+                None if self.unknown else spent),
+            "spent_cost_known_usd_estimate": spent,
+            "cost_unknown_requests": self.unknown,
+            "prior_spent_cost_usd_estimate": prior_estimate,
+            "prior_spent_cost_known_usd_estimate": prior_spent,
+            "prior_cost_unknown_requests": self.prior_unknown,
+            "prior_cost_basis": self.prior_basis,
+            "prior_frames_observed": self.prior_observed,
+            "rates_changed_on_resume": self.rates_changed,
+            "pre_dispatch_reserve_basis": (
+                RESERVE_BASIS_OBSERVED_MAX
+                if self.reserve is not None else "unavailable"),
+            "pre_dispatch_cost_guarantee": False,
+            "stopped_reason": self.stopped_reason,
+            "stopped_detail": self.stopped_detail,
+            "remaining_frame_indices": remaining,
+        }
+
+
+def _seed_ledger(config: FirstPassConfig,
+                 index: dict[str, Any]) -> _BudgetLedger:
+    """Build the ledger, seeding resume counters from checkpoints.
+
+    Only records for batches that will not re-run seed
+    accounting: completed spans and budget-stopped partials.
+    """
+    ledger = _BudgetLedger(
+        max_requests=config.max_requests,
+        ceiling=(None if config.cost_ceiling_usd is None
+                 else float(config.cost_ceiling_usd)),
+        strict=config.strict_cost,
+        rates=config.rates_usd_per_m,
+    )
+    recorded = reconstructed = 0
+    for record in index.values():
+        status = record.get("status")
+        if status == "completed":
+            frames = list(record.get("frame_indices", []))
+        elif status == "budget_stopped":
+            frames = list(
+                record.get("completed_frame_indices", []))
+        else:
+            continue
+        ledger.prior_completed.update(frames)
+        ledger.prior_observed += len(frames)
+        block = record.get("budget")
+        if isinstance(block, dict):
+            recorded += 1
+            ledger.prior_requests += block.get(
+                "requests_submitted", 0)
+            ledger.prior_spent += block.get(
+                "cost_known_usd_estimate", 0.0)
+            ledger.prior_unknown += block.get(
+                "cost_unknown_requests", 0)
+            candidate = block.get(
+                "max_single_request_cost_usd_estimate")
+            if isinstance(candidate, (int, float)) and (
+                    ledger.prior_max_single is None
+                    or candidate > ledger.prior_max_single):
+                ledger.prior_max_single = float(candidate)
+            prior_rates = block.get("rates_usd_per_m")
+            current = (list(config.rates_usd_per_m)
+                       if config.rates_usd_per_m is not None
+                       else None)
+            if current != (list(prior_rates)
+                            if prior_rates is not None
+                            else None):
+                ledger.rates_changed = True
+        else:
+            reconstructed += 1
+            attempts = record.get("attempts", [])
+            ledger.prior_requests += sum(
+                len(entry.get("attempts", []))
+                for entry in attempts
+                if isinstance(entry, dict))
+            estimate = estimate_cost(
+                record.get("input_tokens"),
+                record.get("output_tokens"),
+                config.rates_usd_per_m)
+            if estimate is not None:
+                ledger.prior_spent += estimate
+    if recorded and reconstructed:
+        ledger.prior_basis = "mixed"
+    elif recorded:
+        ledger.prior_basis = "recorded"
+    elif reconstructed:
+        ledger.prior_basis = "reconstructed_from_token_totals"
+    return ledger
 
 
 def is_token_limit_reason(reason: Any) -> bool:
@@ -514,12 +900,18 @@ class FirstPassRunner:
         api_key: str,
         rng: random.Random,
         budget: int,
-        first_number: int,
-    ) -> tuple[InferenceResponse | None, list[dict[str, Any]],
-                str | None]:
-        attempts: list[dict[str, Any]] = []
+        ledger: _BudgetLedger,
+        frame_index: int,
+        attempts: list[dict[str, Any]],
+    ) -> tuple[InferenceResponse | None, str | None]:
         for step in range(self._config.max_attempts):
-            attempt = first_number + step
+            attempt = len(attempts) + 1
+            stop = ledger.pre_dispatch()
+            if stop is not None:
+                reason, detail = stop
+                ledger.halt(reason, detail)
+                raise _BudgetHalt(reason, detail)
+            ledger.note_submitted(frame_index)
             try:
                 result = client.submit(
                     prompt_text, [image], api_key, budget)
@@ -530,6 +922,12 @@ class FirstPassRunner:
                 })
                 if exc.code in ABORT_CODES:
                     raise
+                if ledger.note_transport_failure():
+                    reason = ledger.stopped_reason
+                    detail = ledger.stopped_detail
+                    assert reason is not None
+                    assert detail is not None
+                    raise _BudgetHalt(reason, detail)
                 if (exc.code in RETRYABLE_CODES
                         and step + 1 < self._config.max_attempts):
                     wait = exc.retry_after_seconds
@@ -538,11 +936,11 @@ class FirstPassRunner:
                     self._config.sleeper(wait)
                     attempts[-1]["slept_seconds"] = wait
                     continue
-                return None, attempts, exc.code
+                return None, exc.code
             attempts.append({"attempt": attempt, "budget": budget,
                              "code": "ok"})
-            return result, attempts, None
-        return None, attempts, "RETRIES_EXHAUSTED"
+            return result, None
+        return None, "RETRIES_EXHAUSTED"
 
     def _request_with_retry(
         self,
@@ -552,23 +950,25 @@ class FirstPassRunner:
         api_key: str,
         rng: random.Random,
         policy: BudgetPolicy,
-    ) -> tuple[InferenceResponse | None, list[dict[str, Any]],
-                str | None, dict[str, Any]]:
-        attempts: list[dict[str, Any]] = []
+        ledger: _BudgetLedger,
+        frame_index: int,
+        attempts: list[dict[str, Any]],
+    ) -> tuple[InferenceResponse | None, str | None,
+                dict[str, Any]]:
         budgets_used: list[int] = []
         superseded: list[dict[str, int | None]] = []
         transport_retries = 0
         for position, budget in enumerate(policy.budgets):
-            first_number = len(attempts) + 1
-            result, tried, error = self._transport_attempts(
+            before = len(attempts)
+            result, error = self._transport_attempts(
                 client, prompt_text, image, api_key, rng,
-                budget, first_number,
+                budget, ledger, frame_index, attempts,
             )
-            attempts.extend(tried)
             budgets_used.append(budget)
-            transport_retries += max(0, len(tried) - 1)
+            transport_retries += max(
+                0, len(attempts) - before - 1)
             if error is not None or result is None:
-                return None, attempts, error, {
+                return None, error, {
                     "terminal": TERMINAL_FAILED,
                     "incomplete_reason": None,
                     "budgets_used": budgets_used,
@@ -576,7 +976,7 @@ class FirstPassRunner:
                     "superseded_usage": superseded,
                 }
             if result.status == "completed":
-                return result, attempts, None, {
+                return result, None, {
                     "terminal": None,
                     "incomplete_reason": result.incomplete_reason,
                     "budgets_used": budgets_used,
@@ -593,14 +993,14 @@ class FirstPassRunner:
                     "output_tokens": result.usage.output_tokens,
                 })
                 continue
-            return None, attempts, "INCOMPLETE_STATUS", {
+            return None, "INCOMPLETE_STATUS", {
                 "terminal": decision["terminal"],
                 "incomplete_reason": result.incomplete_reason,
                 "budgets_used": budgets_used,
                 "transport_retries": transport_retries,
                 "superseded_usage": superseded,
             }
-        return None, attempts, "INCOMPLETE_STATUS", {
+        return None, "INCOMPLETE_STATUS", {
             "terminal": TERMINAL_EXHAUSTED,
             "incomplete_reason": None,
             "budgets_used": budgets_used,
@@ -618,14 +1018,37 @@ class FirstPassRunner:
         rng: random.Random,
         paths: dict[str, Path],
         policy: BudgetPolicy,
+        ledger: _BudgetLedger,
+        prior: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         cfg = self._config
-        raw_records: list[dict[str, Any]] = []
-        observations: list[dict[str, Any]] = []
-        attempts_log: list[dict[str, Any]] = []
+        prior = prior or {}
+        ledger.begin_batch()
+        raw_records: list[dict[str, Any]] = list(
+            prior.get("raw", []))
+        observations: list[dict[str, Any]] = list(
+            prior.get("obs", []))
+        attempts_log: list[dict[str, Any]] = list(
+            prior.get("attempts", []))
+        prior_input = prior.get("input_tokens", 0)
+        prior_output = prior.get("output_tokens", 0)
+        prior_budget = prior.get("budget", {})
+        prior_completed = list(prior.get("completed", []))
+        if prior:
+            full_indices = list(prior.get("frame_indices", []))
+            index_range = list(prior.get("index_range", []))
+        else:
+            full_indices = [item.frame.frame_index
+                            for item in prepared]
+            index_range = [
+                prepared[0].frame.frame_index,
+                prepared[-1].frame.frame_index,
+            ]
         requests_sent = retries = 0
         input_tokens = output_tokens = 0
         batch_failed = False
+        halted = False
+        new_observed: list[int] = []
         terminal_states: dict[str, int] = {}
         token_retries = 0
         token_retry_input_tokens = 0
@@ -633,10 +1056,21 @@ class FirstPassRunner:
         token_retried_requests = 0
         token_recovered = 0
         for item in prepared:
-            result, attempts, error, info = self._request_with_retry(
-                client, cfg.prompt_text, item.frame.image_path,
-                api_key, rng, policy,
-            )
+            frame_attempts: list[dict[str, Any]] = []
+            attempts_log.append({
+                "frame_indices": [item.frame.frame_index],
+                "attempts": frame_attempts,
+            })
+            try:
+                result, error, info = self._request_with_retry(
+                    client, cfg.prompt_text,
+                    item.frame.image_path,
+                    api_key, rng, policy, ledger,
+                    item.frame.frame_index, frame_attempts,
+                )
+            except _BudgetHalt:
+                halted = True
+                break
             requests_sent += 1
             retries += info["transport_retries"]
             budgets_used = info["budgets_used"]
@@ -648,10 +1082,6 @@ class FirstPassRunner:
                     token_retry_output_tokens += usage["output_tokens"]
             if len(budgets_used) > 1:
                 token_retried_requests += 1
-            attempts_log.append({
-                "frame_indices": [item.frame.frame_index],
-                "attempts": attempts,
-            })
             if error is not None or result is None:
                 batch_failed = True
                 terminal_states[info["terminal"]] = (
@@ -659,12 +1089,32 @@ class FirstPassRunner:
                 )
                 raw_records.append({
                     "frame_indices": [item.frame.frame_index],
-                    "error_code": error, "attempts": attempts,
+                    "error_code": error,
+                    "attempts": frame_attempts,
                     "terminal_state": info["terminal"],
                     "incomplete_reason": info["incomplete_reason"],
                     "budgets_attempted": budgets_used,
                 })
+                abandoned_pairs = [
+                    (entry.get("input_tokens"),
+                     entry.get("output_tokens"))
+                    for entry in info["superseded_usage"]
+                ]
+                if ledger.note_usages(abandoned_pairs):
+                    halted = True
+                    break
                 continue
+            usage_pairs = [
+                (entry.get("input_tokens"),
+                 entry.get("output_tokens"))
+                for entry in info["superseded_usage"]
+            ]
+            usage_pairs.append((
+                result.usage.input_tokens,
+                result.usage.output_tokens,
+            ))
+            if ledger.note_usages(usage_pairs):
+                halted = True
             if result.usage.input_tokens is not None:
                 input_tokens += result.usage.input_tokens
             if result.usage.output_tokens is not None:
@@ -695,7 +1145,7 @@ class FirstPassRunner:
                 },
                 "latency_seconds": result.latency_seconds,
                 "request_id": result.request_id,
-                "attempts": attempts,
+                "attempts": frame_attempts,
                 "terminal_state": terminal,
                 "incomplete_reason": result.incomplete_reason,
                 "budgets_attempted": budgets_used,
@@ -714,7 +1164,7 @@ class FirstPassRunner:
                     result.usage.reasoning_output_tokens,
                 "latency_seconds": result.latency_seconds,
                 "request_id": result.request_id,
-                "attempts": len(attempts),
+                "attempts": len(frame_attempts),
                 "response_status": result.status,
                 "incomplete_reason": result.incomplete_reason,
                 "terminal_state": terminal,
@@ -728,29 +1178,75 @@ class FirstPassRunner:
                 image_sha256=item.image_sha256,
                 image_encoding=item.image_encoding,
             ))
-        status = "needs_human_review" if batch_failed else "completed"
+            new_observed.append(item.frame.frame_index)
+            if halted:
+                break
+        if halted:
+            status = "budget_stopped"
+        else:
+            status = ("needs_human_review" if batch_failed
+                      else "completed")
         raw_path = paths["raw"] / f"{batch_id}.json"
         obs_path = paths["obs"] / f"{batch_id}.json"
         _write_json(raw_path, raw_records)
         _write_json(obs_path, observations)
+        completed = prior_completed + new_observed
+        merged_spent = round(
+            prior_budget.get("cost_known_usd_estimate", 0.0)
+            + ledger.batch_spent, 4)
+        merged_unknown = (
+            prior_budget.get("cost_unknown_requests", 0)
+            + ledger.batch_unknown)
+        merged_max: float | None = None
+        for candidate in (
+                prior_budget.get(
+                    "max_single_request_cost_usd_estimate"),
+                ledger.batch_max_single):
+            if isinstance(candidate, (int, float)) and (
+                    merged_max is None
+                    or candidate > merged_max):
+                merged_max = float(candidate)
         record = {
             "batch_id": batch_id,
-            "index_range": [
-                prepared[0].frame.frame_index,
-                prepared[-1].frame.frame_index,
-            ],
-            "frame_indices": [item.frame.frame_index
-                              for item in prepared],
+            "index_range": index_range,
+            "frame_indices": full_indices,
             "status": status,
+            "completed_frame_indices": completed,
             "raw_path": raw_path.name,
             "obs_path": obs_path.name,
             "attempts": attempts_log,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
+            "input_tokens": prior_input + input_tokens,
+            "output_tokens": prior_output + output_tokens,
+            "budget": {
+                "requests_submitted": (
+                    prior_budget.get("requests_submitted", 0)
+                    + ledger.batch_requests),
+                "cost_usd_estimate": (
+                    None if merged_unknown else merged_spent),
+                "cost_known_usd_estimate": merged_spent,
+                "cost_unknown_requests": merged_unknown,
+                "max_single_request_cost_usd_estimate": (
+                    merged_max),
+                "rates_usd_per_m": (
+                    list(cfg.rates_usd_per_m)
+                    if cfg.rates_usd_per_m is not None
+                    else None),
+                "currency": "USD",
+            },
+            "stopped_reason": (
+                ledger.stopped_reason if halted else None),
+            "stopped_detail": (
+                ledger.stopped_detail if halted else None),
         }
         with paths["checkpoints"].open(
                 "a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
+        attempted_new = [
+            item.frame.frame_index for item in prepared
+            if item.frame.frame_index in ledger.attempted]
+        unprocessed = [
+            item.frame.frame_index for item in prepared
+            if item.frame.frame_index not in ledger.attempted]
         return {
             "status": status, "requests_sent": requests_sent,
             "retries": retries, "input_tokens": input_tokens,
@@ -761,13 +1257,20 @@ class FirstPassRunner:
             "token_retry_output_tokens": token_retry_output_tokens,
             "token_retried_requests": token_retried_requests,
             "token_recovered": token_recovered,
-            "frames_observed": len(observations),
-            "frames_failed": len(prepared) - len(observations),
+            "frames_observed": len(new_observed),
+            "frames_failed": (
+                len(attempted_new) - len(new_observed)),
+            "frames_unprocessed": len(unprocessed),
+            "stopped_reason": (
+                ledger.stopped_reason if halted else None),
+            "stopped_detail": (
+                ledger.stopped_detail if halted else None),
         }
 
     def run(self) -> dict[str, Any]:
         """Execute all batches with resume; return the run report."""
         cfg = self._config
+        _validate_budget_config(cfg)
         try:
             policy = BudgetPolicy(budgets=tuple(cfg.token_budgets))
         except ValueError as exc:
@@ -783,6 +1286,7 @@ class FirstPassRunner:
             paths[key].mkdir(parents=True, exist_ok=True)
         paths["checkpoints"].parent.mkdir(parents=True, exist_ok=True)
         completed = self._load_checkpoint_index(paths["checkpoints"])
+        ledger = _seed_ledger(cfg, completed)
         prompt_digest = prompt_hash(cfg.prompt_text)
         assert cfg.client_factory is not None
         client = cfg.client_factory()
@@ -805,6 +1309,7 @@ class FirstPassRunner:
             "frames_total": len(prepared),
             "frames_observed": 0,
             "frames_failed": 0,
+            "frames_unprocessed": 0,
         }
         self._check_prior_state(paths["state"], prepared)
         for start in range(0, len(prepared), cfg.batch_size):
@@ -814,24 +1319,36 @@ class FirstPassRunner:
                 f"batch_{span[0].frame.frame_index:08d}-"
                 f"{span[-1].frame.frame_index:08d}"
             )
+            prior: dict[str, Any] | None = None
             if batch_id in completed:
-                prior = completed[batch_id]
+                record = completed[batch_id]
                 current = [item.frame.frame_index
                            for item in span]
-                if prior.get("frame_indices") != current:
+                if record.get("frame_indices") != current:
                     raise FirstPassError(
                         "CHECKPOINT_MISMATCH",
                         f"Batch {batch_id} checkpoint covers "
-                        f"{prior.get('frame_indices')}, current span "
-                        f"is {current}; refusing to resume a "
+                        f"{record.get('frame_indices')}, current "
+                        f"span is {current}; refusing to resume a "
                         "different frame set.",
                         batch_id,
                     )
-                if prior.get("status") == "completed":
+                if record.get("status") == "completed":
                     continue
+                if record.get("status") == "budget_stopped":
+                    prior = self._load_prior_batch(
+                        paths, record)
+                    done = set(prior["completed"])
+                    span = [item for item in span
+                            if item.frame.frame_index
+                            not in done]
+                    if not span:
+                        stats["batches_completed"] += 1
+                        continue
             batch_result = self._run_batch(
                 client, span, batch_id, prompt_digest,
                 cfg.api_key, rng, paths, policy,
+                ledger, prior,
             )
             stats["requests_sent"] += batch_result["requests_sent"]
             stats["retries"] += batch_result["retries"]
@@ -839,10 +1356,12 @@ class FirstPassRunner:
             stats["output_tokens"] += batch_result["output_tokens"]
             stats["frames_observed"] += batch_result["frames_observed"]
             stats["frames_failed"] += batch_result["frames_failed"]
-            if batch_result["status"] != "completed":
-                stats["needs_review"] += 1
-            else:
+            if batch_result["status"] == "completed":
                 stats["batches_completed"] += 1
+            elif batch_result["status"] == "needs_human_review":
+                stats["needs_review"] += 1
+            # A budget_stopped batch is neither: the halt and
+            # the remaining work stay explicit in the report.
             for terminal, count in batch_result[
                     "terminal_states"].items():
                 stats["terminal_states"][terminal] = (
@@ -856,7 +1375,13 @@ class FirstPassRunner:
             stats["token_retried_requests"] += batch_result[
                 "token_retried_requests"]
             stats["token_recovered"] += batch_result["token_recovered"]
-        return self._write_report(paths, stats, prepared)
+            if batch_result["stopped_reason"] is not None:
+                break
+        remaining = ledger.remaining(
+            [item.frame.frame_index for item in prepared])
+        stats["frames_unprocessed"] = len(remaining)
+        return self._write_report(
+            paths, stats, prepared, ledger, remaining)
 
     def _check_prior_state(
             self, state_path: Path,
@@ -880,9 +1405,63 @@ class FirstPassRunner:
                 "refusing resume into this directory.",
             )
 
+    def _load_prior_batch(self, paths: dict[str, Path],
+                          record: dict[str, Any]
+                          ) -> dict[str, Any]:
+        """Load partial batch outputs for a budget-stopped resume.
+
+        Missing or malformed partials fail closed: resuming
+        onto vanished evidence would silently drop billed work.
+        """
+        batch_id = record.get("batch_id", "?")
+        try:
+            raw = json.loads((paths["raw"] / record["raw_path"]
+                              ).read_text(encoding="utf-8"))
+            obs = json.loads((paths["obs"] / record["obs_path"]
+                              ).read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError,
+                TypeError) as exc:
+            raise FirstPassError(
+                "CHECKPOINT_MISMATCH",
+                f"Batch {batch_id} partial outputs are missing "
+                f"or unreadable; refusing resume.",
+                str(batch_id),
+            ) from exc
+        if not isinstance(raw, list) or not isinstance(obs, list):
+            raise FirstPassError(
+                "CHECKPOINT_MISMATCH",
+                f"Batch {batch_id} partial outputs are "
+                f"malformed; refusing resume.",
+                str(batch_id),
+            )
+        full = record.get("frame_indices", [])
+        if not isinstance(full, list) or not full:
+            raise FirstPassError(
+                "CHECKPOINT_MISMATCH",
+                f"Batch {batch_id} checkpoint lacks its frame "
+                f"span; refusing resume.",
+                str(batch_id),
+            )
+        index_range = record.get("index_range") or [
+            full[0], full[-1]]
+        return {
+            "raw": raw,
+            "obs": obs,
+            "attempts": list(record.get("attempts", [])),
+            "input_tokens": record.get("input_tokens", 0),
+            "output_tokens": record.get("output_tokens", 0),
+            "budget": record.get("budget", {}),
+            "completed": list(
+                record.get("completed_frame_indices", [])),
+            "frame_indices": list(full),
+            "index_range": list(index_range),
+        }
+
     def _write_report(self, paths: dict[str, Path],
                       stats: dict[str, Any],
-                      prepared: list[_PreparedFrame]
+                      prepared: list[_PreparedFrame],
+                      ledger: _BudgetLedger,
+                      remaining: list[int]
                       ) -> dict[str, Any]:
         cfg = self._config
         rates = cfg.rates_usd_per_m
@@ -905,6 +1484,8 @@ class FirstPassRunner:
             "frames_total": stats["frames_total"],
             "frames_observed": stats["frames_observed"],
             "frames_failed": stats["frames_failed"],
+            "frames_unprocessed": stats["frames_unprocessed"],
+            "stopped_reason": ledger.stopped_reason,
         }
         if rates is not None and (
             stats["input_tokens"] or stats["output_tokens"]
@@ -947,6 +1528,7 @@ class FirstPassRunner:
                 rates,
             ),
         }
+        state["budget"] = ledger.report_block(remaining)
         _write_json(paths["state"], state)
         _write_json(paths["reports"] / "run_report.json", state)
         return state
