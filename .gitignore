@@ -228,6 +228,25 @@ __marimo__/
 # M2-06A spike: local API run storage (gitignored by design)
 runs_api/
 
+# Bakery Intelligence: local-only media and session artifacts.
+# Source and test videos are large and some footage is licensed;
+# they must never be committed.
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Billable authorization grants and session working notes.
+docs/m206/smoke-grant-*.json
+docs/m206/session-handoff-*.md
+docs/m206/s5c-evidence-sheet.md
+docs/m206/s5d-contact-sheet-*.html
+docs/m206/s5d-review-table-*.csv
+
+# Generated audit/demo archives and reference mockups kept local.
+*.zip
+docs/design/references/
+
 # React frontend (M2-06A spike)
 frontend/node_modules/
 frontend/dist/
