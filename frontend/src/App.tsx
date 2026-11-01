@@ -30,6 +30,8 @@ import {
   type ValidationResult,
   type WeighingEvent,
 } from "./results";
+import ReviewApp from "./ReviewWorkspace";
+import UploadWorkflow from "./UploadWorkflow";
 
 type BackendState =
   | { kind: "checking" }
@@ -55,6 +57,9 @@ const OFFLINE_ACCEPT = ".json,application/json";
 export default function App() {
   const [backend, setBackend] = useState<BackendState>({ kind: "checking" });
   const [workflow, setWorkflow] = useState<string>(WORKFLOW_SMOKE);
+  const [view, setView] = useState<"run" | "review">("review");
+  const [homeNonce, setHomeNonce] = useState(0);
+  const [reviewRunId, setReviewRunId] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [run, setRun] = useState<AnalysisStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -143,14 +148,62 @@ export default function App() {
       <header className="masthead">
         <div>
           <h1>Bakery Intelligence</h1>
-          <p className="subtitle">Analysis review console (M2-06B)</p>
+          <p className="subtitle">
+            AI video analysis with evidence-backed measurements
+            and human validation.
+          </p>
+          <nav className="topnav" aria-label="Primary">
+            <button
+              type="button"
+              onClick={() => {
+                setHomeNonce((value) => value + 1);
+                setReviewRunId(null);
+                setView("review");
+              }}
+            >
+              Home
+            </button>
+            <button
+              type="button"
+              className={view === "review" ? "active" : ""}
+              onClick={() => setView("review")}
+            >
+              Analyses
+            </button>
+            <button
+              type="button"
+              className={view === "run" ? "active" : ""}
+              onClick={() => setView("run")}
+            >
+              + New analysis
+            </button>
+          </nav>
         </div>
         <BackendBadge backend={backend} onRetry={() => void checkBackend()} />
       </header>
 
+      {view === "run" ? (
+      <>
+      <UploadWorkflow
+        onOpenReview={(runId) => {
+          setReviewRunId(runId);
+          setView("review");
+        }}
+      />
+      <details className="tech-runs legacy-tools">
+        <summary>
+          Experimental tools — developer workflows (storage smoke
+          test and offline reconstruction)
+        </summary>
       <main className="grid">
         <section className="card">
-          <h2>Submit a run</h2>
+          <h2>New analysis — experimental tools</h2>
+          <p className="hint">
+            These offline and connectivity workflows run locally
+            for development. Live Meta video analysis is not
+            started from this page; completed real analyses open
+            in the review workspace instead.
+          </p>
           <fieldset className="radio-group">
             <legend>Workflow</legend>
             <label>
@@ -299,12 +352,20 @@ export default function App() {
           />
         )}
       </main>
+      </details>
+      </>
+      ) : (
+      <ReviewApp
+        key={`${homeNonce}-${reviewRunId ?? "home"}`}
+        initialRunId={reviewRunId}
+      />
+      )}
 
       <footer className="footnote">
         Smoke runs prove connectivity plus storage integrity only. Offline
         reconstruction replays uploaded evidence deterministically; drafts
-        require human review before operational use. Evidence images are not
-        served by this console.
+        require human review before operational use.
+        Retained frame images are served read-only in the review workspace.
       </footer>
     </div>
   );

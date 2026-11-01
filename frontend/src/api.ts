@@ -1,7 +1,10 @@
+import type { ReviewAnnotation, ReviewBundle } from "./review";
+
 export const API_BASE =
   import.meta.env?.VITE_API_BASE ?? "http://localhost:8000";
 
 export const WORKFLOW_SMOKE = "storage_smoke";
+export const WORKFLOW_META = "video_pipeline_meta";
 export const WORKFLOW_OFFLINE = "offline_reconstruct";
 export const WORKFLOW_PIPELINE = "video_pipeline_offline";
 
@@ -28,6 +31,9 @@ export interface AnalysisStatus {
   source_sha256: string | null;
   artifact_ids: string[];
   error: string | null;
+  created_at?: string;
+  updated_at?: string | null;
+  attempts?: number;
 }
 
 export class ApiError extends Error {
@@ -93,4 +99,132 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export async function listAnalyses(limit = 12): Promise<AnalysisStatus[]> {
+  const response = await fetch(`${API_BASE}/api/analyses?limit=${limit}`);
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as AnalysisStatus[];
+}
+
+export function frameUrl(runId: string, frameName: string): string {
+  return `${API_BASE}/api/analyses/${runId}/frames/${frameName}`;
+}
+
+export async function fetchReviewBundle(runId: string): Promise<ReviewBundle> {
+  const response = await fetch(`${API_BASE}/api/analyses/${runId}/review`);
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as ReviewBundle;
+}
+
+export interface ReviewInput {
+  frame_index: number;
+  decision: string;
+  value?: number | null;
+  notes?: string | null;
+  reviewer?: string | null;
+}
+
+export interface CostEstimate {
+  estimated_cost_usd: number;
+  frames: number;
+  nonbinding: boolean;
+  basis: string;
+}
+
+export interface UploadInfo {
+  upload_id: string;
+  file_name: string;
+  bytes: number;
+  sha256: string;
+  duration_seconds: number;
+  fps: number;
+  frame_count: number;
+  width: number;
+  height: number;
+  sample_fps: number;
+  estimated_frames: number;
+  exceeds_frame_cap: boolean;
+  deduplicated: boolean;
+  status: string;
+  estimate: CostEstimate | null;
+}
+
+export interface ProgressInfo {
+  run_id: string;
+  workflow: string;
+  status: string;
+  stage: string;
+  frames_total: number | null;
+  frames_processed: number | null;
+  percent: number | null;
+  error: string | null;
+  updated_at: string;
+}
+
+export function uploadVideo(
+  file: File,
+  onProgress: (percent: number) => void,
+): Promise<UploadInfo> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}/api/uploads`);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+    xhr.onload = () => {
+      try {
+        const payload = JSON.parse(xhr.responseText) as UploadInfo & {
+          detail?: string;
+        };
+        if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
+        else {
+          reject(new ApiError(
+            xhr.status, payload.detail ?? `Upload failed (${xhr.status})`));
+        }
+      } catch {
+        reject(new ApiError(xhr.status, `Upload failed (${xhr.status})`));
+      }
+    };
+    xhr.onerror = () => reject(new ApiError(0, "Upload failed: network error."));
+    const form = new FormData();
+    form.append("file", file, file.name);
+    xhr.send(form);
+  });
+}
+
+export async function createUploadAnalysis(
+  uploadId: string,
+  workflow: string,
+  grant: Record<string, unknown> | null,
+): Promise<AnalysisCreated> {
+  const response = await fetch(
+    `${API_BASE}/api/uploads/${uploadId}/analyses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workflow, grant }),
+    });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as AnalysisCreated;
+}
+
+export async function fetchProgress(runId: string): Promise<ProgressInfo> {
+  const response = await fetch(`${API_BASE}/api/analyses/${runId}/progress`);
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as ProgressInfo;
+}
+
+export async function saveReview(
+  runId: string,
+  input: ReviewInput,
+): Promise<ReviewAnnotation> {
+  const response = await fetch(`${API_BASE}/api/analyses/${runId}/reviews`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as ReviewAnnotation;
 }
