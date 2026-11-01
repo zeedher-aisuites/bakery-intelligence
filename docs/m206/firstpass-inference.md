@@ -41,8 +41,12 @@ authorization boundary; a missing factory fails closed.
   seven lifecycle terminal states.
 - Failed frames get raw error records plus terminal counts but
   no observation; the batch is marked `needs_human_review`.
-  Empty, invalid, and abstained outcomes keep explicit
-  records with null fields, never manufactured successes.
+  When the failure carries a final provider response (an
+  incomplete response on a terminal stop), the record retains
+  its status, partial text, usage (including reasoning and
+  cached tokens), request id, and latency. Empty, invalid,
+  and abstained outcomes keep explicit records with null
+  fields, never manufactured successes.
 - Checkpoints append JSONL per batch (with exact frame lists);
   run state and the final report write atomically. Resume skips
   `completed` batches; `needs_human_review` and
@@ -76,7 +80,12 @@ authorization boundary; a missing factory fails closed.
   unknown totals poison the reported estimate while the known
   part stays visible. Halts record a stable reason, the
   remaining frame indices, and split this-run/prior counters;
-  nothing is silently discarded. Resume seeds its accounting
+  nothing is silently discarded. Final-attempt usage on
+  failed frames counts toward known spend (or unknown cost
+  when unreported) exactly once per submit; report token
+  totals sum final-response usage over processed frames,
+  excluding superseded escalation rounds. Resume seeds its
+  accounting
   from checkpoints (recorded blocks preferred, pre-S1 token
   totals reconstructed and labeled as such), so limits apply
   to lifetime totals. The pre-dispatch cost reserve is a

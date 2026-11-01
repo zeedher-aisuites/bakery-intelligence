@@ -299,6 +299,34 @@ def test_incomplete_reason_preserved(
     assert result.incomplete_reason == "max_output_tokens"
 
 
+def test_incomplete_response_keeps_usage_and_identity(
+        tmp_path: Path) -> None:
+    """Boundary contract the runner's failure evidence relies
+    on: partial text, full usage, model echo, and request id
+    survive normalization on an incomplete response."""
+    image = _image(tmp_path / "frame.jpg")
+    response = _sdk_response(
+        status="incomplete",
+        output_text='{"visible_objects": ["scale"], ',
+        incomplete_details={"reason": "max_output_tokens"},
+        id="resp_inc_7",
+    )
+    client = _client([response])
+    result = client.submit(PROMPT, [image], "key", 512)
+    assert result.status == "incomplete"
+    assert result.incomplete_reason == "max_output_tokens"
+    assert result.output_text == (
+        '{"visible_objects": ["scale"], ')
+    assert result.model == MODEL_SPARK
+    assert result.request_id == "resp_inc_7"
+    assert result.latency_seconds >= 0.0
+    assert result.usage.input_tokens == 2913
+    assert result.usage.output_tokens == 1240
+    assert result.usage.total_tokens == 4153
+    assert result.usage.cached_input_tokens == 128
+    assert result.usage.reasoning_output_tokens == 542
+
+
 @pytest.mark.parametrize("field,value", [
     ("status", None), ("status", 200),
     ("output_text", None), ("output_text", 42),

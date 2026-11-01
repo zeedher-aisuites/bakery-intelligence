@@ -1550,3 +1550,285 @@ def test_offline_default_reports_not_billable(
     report = FirstPassRunner(config).run()
     assert report["billable"] is False
     assert report["frames_observed"] == 1
+
+
+# Incomplete-response evidence and accounting (S5-B P0) ----------------------
+
+
+def test_billable_exhausted_preserves_final_response(
+        tmp_path: Path) -> None:
+    """Live-incident shape: one billable submit ends incomplete
+    with reported usage. The raw record must keep the response;
+    the submit must count as unknown cost without rates."""
+    frames = _seq_frames(tmp_path, 1)
+    usage = InferenceUsage(
+        2913, 1240, 4153, cached_input_tokens=128,
+        reasoning_output_tokens=542)
+    partial = '{"visible_objects": ["scale"], "scale_dis'
+    incomplete = _ok(partial, usage, status="incomplete",
+                     incomplete_reason="max_output_tokens",
+                     request_id="resp_live_1",
+                     latency_seconds=1.7)
+    fake = _FakeClient(script={1: [incomplete]})
+    out_dir = tmp_path / "run"
+    report = FirstPassRunner(_config(
+        frames, out_dir, fake,
+        **_billable(token_budgets=(512,)))).run()
+    assert len(fake.calls) == 1
+    assert fake.budgets == [512]
+    assert report["frames_observed"] == 0
+    assert report["frames_failed"] == 1
+    assert report["batches_needing_review"] == 1
+    assert report["lifecycle"]["terminal_states"] == {
+        "exhausted_token_budget": 1}
+    assert report["input_tokens"] == 2913
+    assert report["output_tokens"] == 1240
+    assert report["cost_usd_estimated"] is None
+    assert report["cost_status"] == "COST_UNKNOWN"
+    budget = report["budget"]
+    assert budget["requests_submitted"] == 1
+    assert budget["cost_unknown_requests"] == 1
+    assert budget["spent_cost_usd_estimate"] is None
+    assert budget["spent_cost_known_usd_estimate"] == 0.0
+    assert _obs_index(out_dir) == {}
+    raw = _read_json(out_dir / "raw_responses"
+                     / "batch_00000001-00000001.json")
+    assert len(raw) == 1
+    record = raw[0]
+    assert record["error_code"] == "INCOMPLETE_STATUS"
+    assert record["terminal_state"] == "exhausted_token_budget"
+    assert record["incomplete_reason"] == "max_output_tokens"
+    assert record["budgets_attempted"] == [512]
+    assert record["attempts"] == [
+        {"attempt": 1, "budget": 512, "code": "ok"}]
+    assert record["provider"] == "meta"
+    assert record["model"] == "fake-model"
+    assert record["status"] == "incomplete"
+    assert record["output_text"] == partial
+    assert record["usage"] == {
+        "input_tokens": 2913, "output_tokens": 1240,
+        "total_tokens": 4153, "cached_input_tokens": 128,
+        "reasoning_output_tokens": 542,
+    }
+    assert record["latency_seconds"] == 1.7
+    assert record["request_id"] == "resp_live_1"
+
+
+def test_incomplete_without_usage_counts_unknown(
+        tmp_path: Path) -> None:
+    """An incomplete response without usage is unknown cost,
+    never zero, even when rates are configured."""
+    frames = _seq_frames(tmp_path, 1)
+    incomplete = _ok('{"partial": true', InferenceUsage(),
+                     status="incomplete",
+                     incomplete_reason="max_output_tokens")
+    fake = _FakeClient(script={1: [incomplete]})
+    out_dir = tmp_path / "run"
+    report = FirstPassRunner(_config(
+        frames, out_dir, fake,
+        rates_usd_per_m=DOLLAR_RATES)).run()
+    assert report["frames_observed"] == 0
+    assert report["input_tokens"] == 0
+    assert report["output_tokens"] == 0
+    assert report["cost_usd_estimated"] is None
+    assert report["cost_status"] == "COST_UNKNOWN"
+    budget = report["budget"]
+    assert budget["requests_submitted"] == 1
+    assert budget["cost_unknown_requests"] == 1
+    assert budget["spent_cost_usd_estimate"] is None
+    assert budget["spent_cost_known_usd_estimate"] == 0.0
+    raw = _read_json(out_dir / "raw_responses"
+                     / "batch_00000001-00000001.json")
+    assert raw[0]["output_text"] == '{"partial": true'
+    assert raw[0]["usage"] == {
+        "input_tokens": None, "output_tokens": None,
+        "total_tokens": None, "cached_input_tokens": None,
+        "reasoning_output_tokens": None,
+    }
+
+
+def test_incomplete_empty_text_still_counts_usage(
+        tmp_path: Path) -> None:
+    """Empty partial text stays a failure, but its reported
+    usage still counts toward totals and known spend."""
+    frames = _seq_frames(tmp_path, 1)
+    incomplete = _ok("", DOLLAR_USAGE, status="incomplete",
+                     incomplete_reason="max_output_tokens")
+    fake = _FakeClient(script={1: [incomplete]})
+    out_dir = tmp_path / "run"
+    report = FirstPassRunner(_config(
+        frames, out_dir, fake,
+        rates_usd_per_m=DOLLAR_RATES)).run()
+    assert report["frames_observed"] == 0
+    assert report["lifecycle"]["terminal_states"] == {
+        "exhausted_token_budget": 1}
+    assert report["input_tokens"] == 10
+    assert report["output_tokens"] == 20
+    assert report["cost_usd_estimated"] == 30.0
+    budget = report["budget"]
+    assert budget["cost_unknown_requests"] == 0
+    assert budget["spent_cost_usd_estimate"] == 30.0
+    assert budget["spent_cost_known_usd_estimate"] == 30.0
+    raw = _read_json(out_dir / "raw_responses"
+                     / "batch_00000001-00000001.json")
+    assert raw[0]["output_text"] == ""
+    assert raw[0]["usage"]["input_tokens"] == 10
+
+
+def test_completed_raw_usage_carries_reasoning_and_cached(
+        tmp_path: Path) -> None:
+    """Success raw records persist the full usage block.
+    Reasoning tokens are evidence only: billed spend still
+    derives from input/output totals alone."""
+    frames = _seq_frames(tmp_path, 1)
+    usage = InferenceUsage(10, 20, 30, cached_input_tokens=4,
+                           reasoning_output_tokens=6)
+    fake = _FakeClient(default=_ok(usage=usage))
+    out_dir = tmp_path / "run"
+    report = FirstPassRunner(_config(
+        frames, out_dir, fake,
+        rates_usd_per_m=DOLLAR_RATES)).run()
+    assert report["frames_observed"] == 1
+    raw = _read_json(out_dir / "raw_responses"
+                     / "batch_00000001-00000001.json")
+    assert raw[0]["usage"] == {
+        "input_tokens": 10, "output_tokens": 20,
+        "total_tokens": 30, "cached_input_tokens": 4,
+        "reasoning_output_tokens": 6,
+    }
+    assert report["budget"]["spent_cost_usd_estimate"] == 30.0
+
+
+def test_exhausted_multi_budget_counts_final_usage_once(
+        tmp_path: Path) -> None:
+    """Escalation ending exhausted: every submit counts toward
+    spend exactly once; totals carry the final round only."""
+    frames = _seq_frames(tmp_path, 1)
+    first = _ok("", InferenceUsage(5, 5, 10),
+                status="incomplete",
+                incomplete_reason="max_output_tokens")
+    second = _ok("", InferenceUsage(7, 9, 16),
+                 status="incomplete",
+                 incomplete_reason="max_output_tokens")
+    fake = _FakeClient(script={1: [first, second]})
+    out_dir = tmp_path / "run"
+    report = FirstPassRunner(_config(
+        frames, out_dir, fake, token_budgets=(1024, 2048),
+        rates_usd_per_m=DOLLAR_RATES)).run()
+    assert fake.budgets == [1024, 2048]
+    assert report["frames_observed"] == 0
+    assert report["lifecycle"]["terminal_states"] == {
+        "exhausted_token_budget": 1}
+    assert report["lifecycle"]["token_retries"] == 1
+    budget = report["budget"]
+    assert budget["requests_submitted"] == 2
+    assert budget["cost_unknown_requests"] == 0
+    assert budget["spent_cost_known_usd_estimate"] == 26.0
+    assert report["input_tokens"] == 7
+    assert report["output_tokens"] == 9
+    assert report["cost_usd_estimated"] == 16.0
+    raw = _read_json(out_dir / "raw_responses"
+                     / "batch_00000001-00000001.json")
+    assert raw[0]["budgets_attempted"] == [1024, 2048]
+    assert raw[0]["usage"]["input_tokens"] == 7
+    assert raw[0]["usage"]["output_tokens"] == 9
+
+
+def test_incomplete_unknown_cost_strict_halts(
+        tmp_path: Path) -> None:
+    """Strict mode halts on an incomplete response without
+    usage, same as any other unreported usage; the failure
+    record is still durably written."""
+    frames = _seq_frames(tmp_path, 3)
+    incomplete = _ok("", InferenceUsage(),
+                     status="incomplete",
+                     incomplete_reason="max_output_tokens")
+    fake = _FakeClient(
+        script={1: [incomplete]},
+        default=_ok(usage=DOLLAR_USAGE))
+    out_dir = tmp_path / "run"
+    report = FirstPassRunner(_config(
+        frames, out_dir, fake, batch_size=5,
+        rates_usd_per_m=DOLLAR_RATES,
+        cost_ceiling_usd=1000.0, strict_cost=True)).run()
+    assert len(fake.calls) == 1
+    assert report["frames_observed"] == 0
+    assert report["frames_failed"] == 1
+    assert report["frames_unprocessed"] == 2
+    budget = report["budget"]
+    assert budget["stopped_reason"] == "unknown_cost_strict_halt"
+    assert budget["stopped_detail"] == {
+        "phase": "post_response",
+        "cause": "usage_unreported",
+        "cost_unknown_requests": 1,
+        "cost_ceiling_usd": 1000.0,
+    }
+    assert budget["cost_unknown_requests"] == 1
+    assert budget["spent_cost_usd_estimate"] is None
+    assert budget["remaining_frame_indices"] == [2, 3]
+    raw = _read_json(out_dir / "raw_responses"
+                     / "batch_00000001-00000003.json")
+    assert len(raw) == 1
+    assert raw[0]["error_code"] == "INCOMPLETE_STATUS"
+
+
+def test_exhausted_usage_seeds_resume_without_double_count(
+        tmp_path: Path) -> None:
+    """Failed-frame spend seeds resume accounting exactly
+    once; the resumed batch merges prior evidence with the
+    new outcome instead of re-counting the old submit."""
+    frames = _seq_frames(tmp_path, 1)
+    out_dir = tmp_path / "run"
+    incomplete = _ok("", InferenceUsage(5, 5, 10),
+                     status="incomplete",
+                     incomplete_reason="max_output_tokens")
+    first = _FakeClient(script={1: [incomplete]})
+    partial = FirstPassRunner(_config(
+        frames, out_dir, first,
+        rates_usd_per_m=DOLLAR_RATES)).run()
+    assert partial["batches_needing_review"] == 1
+    assert (partial["budget"]["spent_cost_known_usd_estimate"]
+            == 10.0)
+    second = _FakeClient(default=_ok(usage=DOLLAR_USAGE))
+    report = FirstPassRunner(_config(
+        frames, out_dir, second,
+        rates_usd_per_m=DOLLAR_RATES)).run()
+    assert _call_indices(second) == [1]
+    assert report["frames_observed"] == 1
+    budget = report["budget"]
+    assert budget["prior_requests_submitted"] == 1
+    assert budget["requests_submitted"] == 1
+    assert budget["prior_spent_cost_known_usd_estimate"] == 10.0
+    assert budget["spent_cost_known_usd_estimate"] == 30.0
+    assert budget["cost_unknown_requests"] == 0
+    assert budget["prior_cost_unknown_requests"] == 0
+    records = _checkpoints(out_dir)
+    assert len(records) == 2
+    assert records[1]["input_tokens"] == 15
+    assert records[1]["output_tokens"] == 25
+    raw = _read_json(out_dir / "raw_responses"
+                     / "batch_00000001-00000001.json")
+    assert len(raw) == 2
+    assert raw[0]["error_code"] == "INCOMPLETE_STATUS"
+    assert "error_code" not in raw[1]
+
+
+def test_failed_raw_record_holds_no_secrets(
+        tmp_path: Path) -> None:
+    """The threaded credential must reach the client seam but
+    never land in persisted evidence or reports."""
+    key = "SYNTHETIC-KEY-9f8e7d6c5b4a"
+    frames = _seq_frames(tmp_path, 1)
+    incomplete = _ok('{"partial": true', DOLLAR_USAGE,
+                     status="incomplete",
+                     incomplete_reason="max_output_tokens",
+                     request_id="resp_synth_1")
+    fake = _FakeClient(script={1: [incomplete]})
+    out_dir = tmp_path / "run"
+    config = _config(frames, out_dir, fake, api_key=key)
+    assert key not in repr(config)
+    FirstPassRunner(config).run()
+    assert fake.calls[0][2] == key
+    for path in sorted(out_dir.rglob("*")):
+        if path.is_file():
+            assert key not in path.read_text(encoding="utf-8")

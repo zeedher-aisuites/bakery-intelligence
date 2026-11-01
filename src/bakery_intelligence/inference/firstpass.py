@@ -868,6 +868,23 @@ def _detect_encoding(blob: bytes) -> str | None:
     return None
 
 
+def _usage_block(usage: InferenceUsage) -> dict[str, int | None]:
+    """Persist reported token usage; never invent counts.
+
+    Reasoning and cached tokens are evidence only: cost
+    estimation reads the input/output totals, so reasoning
+    already folded into output_tokens is never added again,
+    and no separate reasoning rate is invented.
+    """
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_tokens": usage.total_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "reasoning_output_tokens": usage.reasoning_output_tokens,
+    }
+
+
 def _write_json(path: Path, payload: Any) -> None:
     """Write JSON atomically via temp file plus replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1067,6 +1084,14 @@ class FirstPassRunner:
         attempts: list[dict[str, Any]],
     ) -> tuple[InferenceResponse | None, str | None,
                 dict[str, Any]]:
+        """Submit one frame; keep the final response available.
+
+        The info dict always carries ``final_response``: the
+        last provider response when the caller would otherwise
+        lose it (an incomplete response on a terminal stop),
+        else None. A None result still signals failure, so
+        partial text never becomes an observation.
+        """
         budgets_used: list[int] = []
         superseded: list[dict[str, int | None]] = []
         transport_retries = 0
@@ -1086,6 +1111,7 @@ class FirstPassRunner:
                     "budgets_used": budgets_used,
                     "transport_retries": transport_retries,
                     "superseded_usage": superseded,
+                    "final_response": None,
                 }
             if result.status == "completed":
                 return result, None, {
@@ -1094,6 +1120,7 @@ class FirstPassRunner:
                     "budgets_used": budgets_used,
                     "transport_retries": transport_retries,
                     "superseded_usage": superseded,
+                    "final_response": None,
                 }
             decision = decide_attempt(
                 result.status, result.incomplete_reason,
@@ -1111,6 +1138,7 @@ class FirstPassRunner:
                 "budgets_used": budgets_used,
                 "transport_retries": transport_retries,
                 "superseded_usage": superseded,
+                "final_response": result,
             }
         return None, "INCOMPLETE_STATUS", {
             "terminal": TERMINAL_EXHAUSTED,
@@ -1118,6 +1146,7 @@ class FirstPassRunner:
             "budgets_used": budgets_used,
             "transport_retries": transport_retries,
             "superseded_usage": superseded,
+            "final_response": None,
         }
 
     def _run_batch(
@@ -1208,19 +1237,40 @@ class FirstPassRunner:
                 terminal_states[info["terminal"]] = (
                     terminal_states.get(info["terminal"], 0) + 1
                 )
-                raw_records.append({
+                failed_record: dict[str, Any] = {
                     "frame_indices": [item.frame.frame_index],
                     "error_code": error,
                     "attempts": frame_attempts,
                     "terminal_state": info["terminal"],
                     "incomplete_reason": info["incomplete_reason"],
                     "budgets_attempted": budgets_used,
-                })
+                }
+                final = info["final_response"]
+                if final is not None:
+                    failed_record.update({
+                        "provider": cfg.provider,
+                        "model": final.model,
+                        "status": final.status,
+                        "output_text": final.output_text,
+                        "usage": _usage_block(final.usage),
+                        "latency_seconds": final.latency_seconds,
+                        "request_id": final.request_id,
+                    })
+                raw_records.append(failed_record)
                 abandoned_pairs = [
                     (entry.get("input_tokens"),
                      entry.get("output_tokens"))
                     for entry in info["superseded_usage"]
                 ]
+                if final is not None:
+                    abandoned_pairs.append((
+                        final.usage.input_tokens,
+                        final.usage.output_tokens,
+                    ))
+                    if final.usage.input_tokens is not None:
+                        input_tokens += final.usage.input_tokens
+                    if final.usage.output_tokens is not None:
+                        output_tokens += final.usage.output_tokens
                 if ledger.note_usages(abandoned_pairs):
                     halted = True
                     break
@@ -1259,11 +1309,7 @@ class FirstPassRunner:
                 "frame_indices": [item.frame.frame_index],
                 "model": result.model, "status": result.status,
                 "output_text": result.output_text,
-                "usage": {
-                    "input_tokens": result.usage.input_tokens,
-                    "output_tokens": result.usage.output_tokens,
-                    "total_tokens": result.usage.total_tokens,
-                },
+                "usage": _usage_block(result.usage),
                 "latency_seconds": result.latency_seconds,
                 "request_id": result.request_id,
                 "attempts": frame_attempts,
