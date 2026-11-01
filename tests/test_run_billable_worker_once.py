@@ -181,6 +181,7 @@ def test_run_invokes_worker_once_exactly(
         environ={}, worker_main=fake_worker)
     assert code == 7
     assert calls == [["--once", "--worker-id", "w-9",
+                      "--allow-billable",
                       "--storage-dir", "s", "--db-path", "d"]]
     assert META_KEY not in " ".join(calls[0])
     out, err = capsys.readouterr()
@@ -196,7 +197,8 @@ def test_run_uses_worker_defaults(
         ["--run"], environ={},
         worker_main=lambda argv: calls.append(argv) or 0)
     assert code == 0
-    assert calls == [["--once", "--worker-id", "worker-1"]]
+    assert calls == [["--once", "--worker-id", "worker-1",
+                      "--allow-billable"]]
 
 
 def test_check_and_run_rejected(

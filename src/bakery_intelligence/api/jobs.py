@@ -160,3 +160,7 @@ class JobService:
     def get(self, run_id: str) -> JobRecord | None:
         """Return a job record or None when unknown."""
         return self._store.get(run_id)
+
+    def list_recent(self, limit: int = 50) -> list[JobRecord]:
+        """Return the newest completed runs, newest first."""
+        return self._store.list_recent(STATUS_COMPLETED, limit)

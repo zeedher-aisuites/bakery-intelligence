@@ -114,7 +114,8 @@ def load_credentials(
 
 def _worker_argv(args: argparse.Namespace) -> list[str]:
     """Build the exact worker CLI invocation (key-free)."""
-    argv = ["--once", "--worker-id", args.worker_id]
+    argv = ["--once", "--worker-id", args.worker_id,
+            "--allow-billable"]
     if args.storage_dir is not None:
         argv += ["--storage-dir", args.storage_dir]
     if args.db_path is not None:

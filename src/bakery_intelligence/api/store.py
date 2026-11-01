@@ -141,7 +141,24 @@ class SqliteJobStore:
         ).fetchone()
         return _row_to_record(row) if row is not None else None
 
-    def claim_next(self, worker_id: str, now_iso: str) -> JobRecord | None:
+    def list_recent(self, status: str, limit: int) -> list[JobRecord]:
+        """Return newest-first runs in one status (bounded)."""
+        if status not in (STATUS_QUEUED, STATUS_RUNNING,
+                           STATUS_COMPLETED, STATUS_FAILED):
+            raise ValueError(f"Invalid status filter: {status!r}.")
+        if (isinstance(limit, bool) or not isinstance(limit, int)
+                or not 1 <= limit <= 200):
+            raise ValueError(f"Invalid list limit: {limit!r}.")
+        rows = self._cursor().execute(
+            "SELECT * FROM jobs WHERE status = ?"
+            " ORDER BY created_at DESC LIMIT ?;",
+            (status, limit),
+        ).fetchall()
+        return [_row_to_record(row) for row in rows]
+
+    def claim_next(self, worker_id: str, now_iso: str,
+                   exclude_workflows: frozenset[str] | None = None,
+                   ) -> JobRecord | None:
         """Atomically move the oldest queued job to running.
 
         Returns the claimed record, or None when no job is queued.
@@ -152,10 +169,18 @@ class SqliteJobStore:
             connection = self._cursor()
             connection.execute("BEGIN IMMEDIATE;")
             try:
+                query = ("SELECT run_id FROM jobs WHERE status = ?")
+                params: list[Any] = [STATUS_QUEUED]
+                if exclude_workflows:
+                    marks = ", ".join(
+                        "?" for _ in exclude_workflows)
+                    query += f" AND workflow NOT IN ({marks})"
+                    params.extend(sorted(exclude_workflows))
+                query += " ORDER BY created_at LIMIT 1;"
                 row = connection.execute(
-                    "SELECT run_id FROM jobs WHERE status = ?"
-                    " ORDER BY created_at LIMIT 1;",
-                    (STATUS_QUEUED,),
+                    query, params
+                    # query ends with ORDER BY created_at LIMIT 1
+                    
                 ).fetchone()
                 if row is None:
                     connection.execute("ROLLBACK;")

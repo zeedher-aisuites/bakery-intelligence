@@ -195,6 +195,7 @@ def run_once(store: SqliteJobStore, storage: StorageBackend,
              worker_id: str,
              evidence_dir: Path | None = None,
              heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS,
+             allow_billable: bool = True,
              ) -> str | None:
     """Claim and execute one job; return its run id or None if idle.
 
@@ -211,7 +212,10 @@ def run_once(store: SqliteJobStore, storage: StorageBackend,
     cutoff = (now - timedelta(seconds=DEFAULT_STALE_SECONDS)).isoformat()
     store.requeue_stale(now.isoformat(), cutoff, WORKFLOW_MAX_ATTEMPTS,
                         billable=BILLABLE_WORKFLOWS)
-    record = store.claim_next(worker_id, now.isoformat())
+    record = store.claim_next(
+        worker_id, now.isoformat(),
+        exclude_workflows=(
+            None if allow_billable else BILLABLE_WORKFLOWS))
     if record is None:
         return None
     try:
@@ -253,13 +257,15 @@ def run_once(store: SqliteJobStore, storage: StorageBackend,
 def serve(store: SqliteJobStore, storage: StorageBackend,
           worker_id: str, poll_seconds: float = DEFAULT_POLL_SECONDS,
           stop: threading.Event | None = None,
-          evidence_dir: Path | None = None) -> None:
+          evidence_dir: Path | None = None,
+          allow_billable: bool = False) -> None:
     """Claim and execute jobs until the stop event is set."""
     stop_event = stop or threading.Event()
     while not stop_event.is_set():
         try:
             claimed = run_once(store, storage, worker_id,
-                               evidence_dir=evidence_dir)
+                               evidence_dir=evidence_dir,
+                               allow_billable=allow_billable)
         except Exception:
             claimed = None
         if claimed is None:
@@ -280,6 +286,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--worker-id", default="worker-1")
     parser.add_argument("--poll-seconds", type=float,
                         default=DEFAULT_POLL_SECONDS)
+    parser.add_argument("--allow-billable", action="store_true",
+                        help="Also claim billable workflows. Only "
+                        "the authorized one-shot launcher sets "
+                        "this; generic workers never claim paid "
+                        "jobs by default.")
     parser.add_argument("--once", action="store_true",
                         help="Execute at most one job, then exit.")
     args = parser.parse_args(argv)
@@ -290,14 +301,16 @@ def main(argv: list[str] | None = None) -> int:
     store = SqliteJobStore(db_path)
     if args.once:
         run_id = run_once(store, storage, args.worker_id,
-                          evidence_dir=args.evidence_dir)
+                          evidence_dir=args.evidence_dir,
+                          allow_billable=args.allow_billable)
         print(f"worker done: {run_id or 'idle'}")
         return 0
     print(f"worker {args.worker_id} serving {storage.base_dir} ...")
     try:
         serve(store, storage, args.worker_id,
               poll_seconds=args.poll_seconds,
-              evidence_dir=args.evidence_dir)
+              evidence_dir=args.evidence_dir,
+              allow_billable=args.allow_billable)
     except KeyboardInterrupt:
         print("worker stopped.")
     return 0

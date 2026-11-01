@@ -685,6 +685,7 @@ def run_pipeline_offline(
     billable_strict_cost: bool = False,
     billable_api_key: str = "",
     billable_live: bool = False,
+    max_video_bytes: int = PIPELINE_MAX_VIDEO_BYTES,
 ) -> dict[str, bytes]:
     """Run all pipeline stages; return id -> bytes artifacts.
 
@@ -707,11 +708,27 @@ def run_pipeline_offline(
     ValueError when inference yields no usable
     observations.
     """
-    if len(video_bytes) > PIPELINE_MAX_VIDEO_BYTES:
+    if (isinstance(max_video_bytes, bool)
+            or not isinstance(max_video_bytes, int)
+            or max_video_bytes <= 0):
+        raise ValueError(
+            "max_video_bytes must be a positive int, "
+            f"got {max_video_bytes!r}.")
+    effective_max = max_video_bytes
+    if max_video_bytes == PIPELINE_MAX_VIDEO_BYTES:
+        env_bound = os.environ.get("BAKERY_PIPELINE_MAX_VIDEO_BYTES")
+        if env_bound:
+            try:
+                parsed_bound = int(env_bound)
+            except ValueError:
+                parsed_bound = 0
+            if parsed_bound > 0:
+                effective_max = parsed_bound
+    if len(video_bytes) > effective_max:
         raise VideoError(
             "VIDEO_TOO_LARGE",
             f"Pipeline video is {len(video_bytes)} bytes; limit is "
-            f"{PIPELINE_MAX_VIDEO_BYTES}.",
+            f"{effective_max}.",
             video_name,
         )
     actual_sha = _sha256_bytes(video_bytes)
