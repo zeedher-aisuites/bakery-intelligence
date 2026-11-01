@@ -53,6 +53,7 @@ from bakery_intelligence.api.video import VIDEO_MANIFEST_FORMAT
 from bakery_intelligence.api.worker import run_once
 from bakery_intelligence.inference.fake import DeterministicFakeClient
 from bakery_intelligence.inference.firstpass import (
+    MODEL_OUTPUT_FIELDS,
     FirstPassError,
     prompt_hash,
 )
@@ -60,6 +61,7 @@ from bakery_intelligence.inference.meta_spark import (
     MODEL_SPARK,
     MetaSparkClient,
 )
+from bakery_intelligence.video.intake import VideoError
 
 VALID_OBS = json.dumps({
     "visible_objects": ["scale"],
@@ -285,6 +287,9 @@ def test_meta_success_end_to_end(tmp_path: Path) -> None:
     assert summary["network_accessed"] is False
     assert summary["paid_services_used"] is False
     assert summary["synthetic_inference"] is True
+    assert summary["workflow"] == WORKFLOW_VIDEO_PIPELINE_META
+    assert summary["fake_model_id"] == MODEL_SPARK
+    assert summary["fake_provider_id"] == META_PROVIDER_ID
     assert "caller-supplied" in summary["note"]
     assert "test-double" in summary["note"]
     report = json.loads(artifacts["firstpass_report.json"])
@@ -620,3 +625,62 @@ def test_registered_workflows_cannot_trigger_meta(
         assert "must not trigger" not in (final.error or "")
         if error_match is not None:
             assert error_match in (final.error or "")
+
+
+# S5-B.3: live JSON conformance and provenance ---------------------------
+
+
+def test_pipeline_prompt_requires_json_observation() -> None:
+    assert PIPELINE_PROMPT != (
+        "PIPELINE TEST PROMPT (fake client ignores content).")
+    assert "exactly one JSON object" in PIPELINE_PROMPT
+    for field in MODEL_OUTPUT_FIELDS:
+        assert field in PIPELINE_PROMPT
+
+
+def test_meta_live_summary_provenance(tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    work_dir = tmp_path / "work"
+    client, sdk = _meta_client(
+        [_ok_response(f"resp_live_{index}") for index in range(3)])
+    artifacts = run_pipeline_offline(
+        billable_client=client, billable_live=True,
+        billable_max_requests=3,
+        **_pipeline_kwargs(tmp_path, raw, work_dir))
+    assert len(sdk.calls) == 3
+    summary = json.loads(artifacts["pipeline_summary.json"])
+    assert summary["workflow"] == WORKFLOW_VIDEO_PIPELINE_META
+    assert summary["inference_performed"] is True
+    assert summary["network_accessed"] is True
+    assert summary["paid_services_used"] is True
+    assert summary["synthetic_inference"] is False
+    assert summary["fake_model_id"] == MODEL_SPARK
+    assert summary["fake_provider_id"] == META_PROVIDER_ID
+    assert "provider was contacted" in summary["note"]
+    assert "test-double" not in summary["note"]
+    assert "requires human review" in summary["note"]
+
+
+def test_billable_live_requires_client(tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    work_dir = tmp_path / "work"
+    with pytest.raises(ValueError, match="billable_client"):
+        run_pipeline_offline(
+            billable_live=True,
+            **_pipeline_kwargs(tmp_path, raw, work_dir))
+    assert not (work_dir / "pipeline_state.json").exists()
+
+
+def test_live_zero_request_failure_claims_nothing(
+        tmp_path: Path) -> None:
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    work_dir = tmp_path / "work"
+    client, sdk = _meta_client([_ok_response("resp_unused")])
+    with pytest.raises(VideoError) as caught:
+        run_pipeline_offline(
+            billable_client=client, billable_live=True,
+            billable_max_requests=3, max_frames=1,
+            **_pipeline_kwargs(tmp_path, raw, work_dir))
+    assert caught.value.code == "TOO_MANY_FRAMES"
+    assert sdk.calls == []
+    assert not (work_dir / "pipeline_state.json").exists()

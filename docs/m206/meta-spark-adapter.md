@@ -27,7 +27,7 @@ repository evidence. Paths are relative to the repo root.
 | V1 | SDK base URL | `https://api.meta.ai/v1` | `experiments/001_meta_api/check_connection.py`, `experiments/004_baseten_api/check_meta_vision.py`, `experiments/006_p04_multimodal_inference/meta_client.py` |
 | V2 | Model id | `muse-spark-1.3` | Same three files, plus recorded `model` echo in `data/processed/experiment_006/full_run/p04_full_4096/raw_responses/` |
 | V3 | Auth | Bearer API key (`OpenAI(api_key=...)`; raw `Authorization: Bearer` for `/v1/models`) | Exp. 001 (both forms), `meta_client.py` (`list_models`) |
-| V4 | Request shape | `responses.create(model, input=[{"role": "user", "content": [{"type": "input_text", ...}, {"type": "input_image", "image_url": "data:<mime>;base64,..."}]}])` | `check_meta_vision.py`, `meta_client.py` |
+| V4 | Request shape | `responses.create(model, input=[{"role": "user", "content": [{"type": "input_text", ...}, {"type": "input_image", "image_url": "data:<mime>;base64,..."}]}])` plus `text.format` JSON-schema constraint (S5-B.3; [structured-output](https://dev.meta.ai/docs/structured-output)) | `check_meta_vision.py`, `meta_client.py` |
 | V5 | Token budget | Per-request `max_output_tokens` (1024 locally proven in 001/004; 4096 used by the 006 full run) | Exp. 001, `meta_client.py` |
 | V6 | No SDK retries | `max_retries=0` on every SDK construction | Exp. 001, `check_meta_vision.py`, `meta_client.py` |
 | V7 | Response surface | `status`, `output_text`, `model`, `usage`, `id`, `incomplete_details`, `output` attributes | Exp. 001 diagnostics, `meta_client.py` normalization |
@@ -195,3 +195,19 @@ for live runs (the S4-B flags assert
 synthetic/test-double execution and must become
 transport-aware); and frontend handling for
 billable summaries.
+
+## 7. S5-B.3 corrections (offline, no live execution)
+
+S5-B.2 (`run_9dc6c4fb5afc`) proved live dispatch but
+returned prose on 2/2 frames: the pipeline sent a
+stub prompt and requested no output format. S5-B.3
+sends the frozen 006 observation prompt and adds
+`text.format` JSON-schema constrained decoding
+(`FrameObservation`, mirroring
+`MODEL_OUTPUT_FIELDS`). The summary is
+transport-aware: live runs report the meta workflow
+with inference/network/paid flags set and synthetic
+cleared; test-double runs keep the S4-B synthetic
+labels. Identity key names stay `fake_*`-prefixed
+for console compatibility; values are the actual
+client identity.

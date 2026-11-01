@@ -10,6 +10,7 @@ and proof that no hidden retries exist.
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,6 +18,7 @@ from typing import Any
 import pytest
 
 from bakery_intelligence.inference.firstpass import (
+    MODEL_OUTPUT_FIELDS,
     FirstPassError,
     FirstPassRunner,
     FrameRef,
@@ -26,6 +28,8 @@ from bakery_intelligence.inference.firstpass import (
 from bakery_intelligence.inference.meta_spark import (
     BASE_URL,
     MODEL_SPARK,
+    OBSERVATION_JSON_SCHEMA,
+    OBSERVATION_SCHEMA_NAME,
     MetaSparkClient,
     billable_runner_config,
 )
@@ -529,3 +533,23 @@ def test_adapter_runs_offline_end_to_end(tmp_path: Path) -> None:
     assert report["budget"]["stopped_reason"] is None
     (call,) = sdk.responses.calls
     assert call["max_output_tokens"] == 512
+
+
+def test_request_constrains_observation_schema(tmp_path: Path) -> None:
+    image = _image(tmp_path / "frame.jpg")
+    client = _client([_sdk_response()])
+    client.submit(PROMPT, [image], "key", 1024)
+    (call,) = _sdk_of(client).responses.calls
+    assert call["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": OBSERVATION_SCHEMA_NAME,
+            "schema": OBSERVATION_JSON_SCHEMA,
+        }
+    }
+    assert set(OBSERVATION_JSON_SCHEMA["properties"]) == set(
+        MODEL_OUTPUT_FIELDS)
+    assert sorted(OBSERVATION_JSON_SCHEMA["required"]) == sorted(
+        MODEL_OUTPUT_FIELDS)
+    assert OBSERVATION_JSON_SCHEMA["additionalProperties"] is False
+    assert "$ref" not in json.dumps(OBSERVATION_JSON_SCHEMA)

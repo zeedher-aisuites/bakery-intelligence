@@ -22,6 +22,7 @@ from typing import Any
 
 from bakery_intelligence.inference.firstpass import (
     DEFAULT_BATCH_SIZE,
+    MODEL_OUTPUT_FIELDS,
     FirstPassConfig,
     FirstPassError,
     FrameRef,
@@ -40,6 +41,46 @@ MAX_IMAGES_PER_REQUEST = 50
 # Inherited from the 006 full-run client (001 used 30s for text,
 # 004-meta 60s for vision); configurable per client.
 DEFAULT_TIMEOUT_SECONDS = 120.0
+# S5-B.3: Responses structured-output contract for frame
+# observations (https://dev.meta.ai/docs/structured-output):
+# text.format carries the JSON Schema and decoding is
+# constrained to it. Properties mirror MODEL_OUTPUT_FIELDS
+# (required is built from it; the property set is guarded
+# by test). Flat object without $ref: recursive schemas
+# return HTTP 400. strict is omitted (default false):
+# output is constrained either way, so the flag would only
+# add a schema-subset 400 surface.
+OBSERVATION_SCHEMA_NAME = "FrameObservation"
+OBSERVATION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "visible_objects": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "scale_display_verbatim": {"type": ["string", "null"]},
+        "scale_readable": {"type": "boolean"},
+        "scale_state": {
+            "type": "string",
+            "enum": ["stable", "changing", "zero", "off",
+                     "occluded", "unknown"],
+        },
+        "tare_action_visible": {"type": "boolean"},
+        "addition_or_removal_visible": {
+            "type": "string",
+            "enum": ["addition", "removal", "none", "unknown"],
+        },
+        "container_description": {"type": ["string", "null"]},
+        "container_changed_hint": {"type": "boolean"},
+        "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+        },
+        "ambiguity_notes": {"type": ["string", "null"]},
+    },
+    "required": list(MODEL_OUTPUT_FIELDS),
+    "additionalProperties": False,
+}
 
 _JPEG_MAGIC = b"\xff\xd8\xff"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -184,6 +225,13 @@ class MetaSparkClient:
                 input=[{"role": "user", "content": chunks}],
                 max_output_tokens=max_output_tokens,
                 store=self.store,
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": OBSERVATION_SCHEMA_NAME,
+                        "schema": OBSERVATION_JSON_SCHEMA,
+                    }
+                },
             )
         except Exception as exc:  # Mapped below; never leaks the key.
             raise self._map_exception(exc) from exc

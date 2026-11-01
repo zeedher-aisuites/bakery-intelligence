@@ -89,7 +89,29 @@ PIPELINE_EVIDENCE_VERSION = "pipeline-evidence/1"
 PIPELINE_SUMMARY_ARTIFACT = "pipeline_summary.json"
 FIRSTPASS_REPORT_ARTIFACT = "firstpass_report.json"
 
-PIPELINE_PROMPT = "PIPELINE TEST PROMPT (fake client ignores content)."
+# Frozen observation prompt, mirrored from
+# experiments/006_p04_multimodal_inference/prompts.py
+# (PRIMARY_PROMPT). The live path sends this exact text
+# (S5-B.2 dispatched a stub and received prose); prompt
+# bytes stay fingerprinted per run via prompt_sha256.
+PIPELINE_PROMPT = """Analyze one cooking-video frame for a baking-evidence study.
+Reply with exactly one JSON object and no other text, using these keys:
+{
+  "visible_objects": ["short noun phrases, empty list if unclear"],
+  "scale_display_verbatim": "exact digits/segments on the scale display, or null",
+  "scale_readable": true/false,
+  "scale_state": "stable/changing/zero/off/occluded/unknown",
+  "tare_action_visible": true/false,
+  "addition_or_removal_visible": "addition/removal/none/unknown",
+  "container_description": "short phrase or null",
+  "container_changed_hint": true/false,
+  "confidence": "high/medium/low",
+  "ambiguity_notes": "short note or null"
+}
+Rules: report only what is visible; use null when evidence is
+insufficient; never infer ingredient identity, units, or net mass;
+never convert a display reading into a quantity; a negative display
+stays a display string, never a negative quantity."""
 PIPELINE_PASS_ID = "pipeline_firstpass"
 PIPELINE_SAMPLE_FPS = 1.0
 PIPELINE_BATCH_SIZE = 5
@@ -662,18 +684,21 @@ def run_pipeline_offline(
     billable_rates_usd_per_m: tuple[float, float] | None = None,
     billable_strict_cost: bool = False,
     billable_api_key: str = "",
+    billable_live: bool = False,
 ) -> dict[str, bytes]:
     """Run all pipeline stages; return id -> bytes artifacts.
 
     Orchestration over caller-provided bytes and directory:
     stage, extract, infer, transform, reconstruct. Inference
     uses the deterministic fake unless ``billable_client``
-    supplies an explicit billable-capable client (S4-B:
-    MetaSparkClient with a test-double SDK only), which
+    supplies an explicit billable-capable client, which
     runs under S3 single-submit invariants via
     ``billable_runner_config``. At most one client override
-    may be given. No registered workflow supplies the
-    billable seam. The work directory is durable and
+    may be given. ``execute_video_pipeline_meta`` supplies
+    the seam for live runs (``billable_live=True``);
+    offline callers use test-double SDKs (the default
+    ``billable_live=False``), which the summary labels
+    synthetic. The work directory is durable and
     run-scoped: a fresh directory runs every stage, while a
     directory holding a verified state file resumes instead
     of restarting (see the module docstring). Raises
@@ -705,7 +730,8 @@ def run_pipeline_offline(
             or billable_cost_ceiling_usd is not None
             or billable_rates_usd_per_m is not None
             or billable_strict_cost is not False
-            or billable_api_key != ""):
+            or billable_api_key != ""
+            or billable_live is not False):
         raise ValueError(
             "billable_* parameters require billable_client; "
             "refusing to silently ignore billing bounds.")
@@ -718,6 +744,8 @@ def run_pipeline_offline(
         billable_client if meta_backed
         else fake or DeterministicFakeClient())
     provider_id = META_PROVIDER_ID if meta_backed else FAKE_PROVIDER_ID
+    workflow_name = (WORKFLOW_VIDEO_PIPELINE_META if meta_backed
+                     else WORKFLOW_VIDEO_PIPELINE_OFFLINE)
     fingerprinted_rates = (
         list(billable_rates_usd_per_m)
         if meta_backed and billable_rates_usd_per_m is not None
@@ -774,7 +802,7 @@ def run_pipeline_offline(
         sidecar_path = (work_dir / "staging" / sidecar_name)
         state = {
             "state_version": PIPELINE_STATE_VERSION,
-            "workflow": WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+            "workflow": workflow_name,
             "run_id": run_id,
             "source_object_id": source_object_id,
             "source_sha256": actual_sha,
@@ -809,7 +837,7 @@ def run_pipeline_offline(
         manifest_bytes = extraction.manifest_path.read_bytes()
     else:
         expected = {
-            "workflow": WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+            "workflow": workflow_name,
             "run_id": run_id,
             "source_object_id": source_object_id,
             "source_sha256": actual_sha,
@@ -943,7 +971,14 @@ def run_pipeline_offline(
     firstpass_report_raw = (
         firstpass_dir / "reports" / "run_report.json").read_bytes()
     manifest_sha = _sha256_bytes(manifest_bytes)
-    if meta_backed:
+    live = meta_backed and billable_live
+    if live:
+        note = ("Live Meta-backed pipeline run under "
+                "single-submit billable policy: the provider "
+                "was contacted, readings are model predictions, "
+                "and the draft requires human review before "
+                "operational use.")
+    elif meta_backed:
         note = ("Meta-backed pipeline run with a caller-supplied "
                 "client under single-submit billable policy. S4-B "
                 "supports test-double SDKs only: no provider was "
@@ -957,16 +992,16 @@ def run_pipeline_offline(
                 "and the draft requires human review before "
                 "operational use.")
     payload = {
-        "workflow": WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+        "workflow": workflow_name,
         "run_id": run_id,
         "resumed": resumed,
         "source_object_id": source_object_id,
         "source_sha256": source_sha256,
         "evidence_version": PIPELINE_EVIDENCE_VERSION,
-        "inference_performed": False,
-        "network_accessed": False,
-        "paid_services_used": False,
-        "synthetic_inference": True,
+        "inference_performed": live,
+        "network_accessed": live,
+        "paid_services_used": live,
+        "synthetic_inference": not live,
         "fake_model_id": client_model_id(client),
         "fake_provider_id": provider_id,
         "video": video_meta,
@@ -1099,6 +1134,7 @@ def execute_video_pipeline_meta(
             billable_rates_usd_per_m=grant.rates_usd_per_m,
             billable_strict_cost=grant.strict_cost,
             billable_api_key=api_key,
+            billable_live=True,
             max_frames=grant.max_frames,
         )
     except Exception as exc:
