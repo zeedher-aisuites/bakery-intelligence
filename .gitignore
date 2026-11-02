@@ -4,6 +4,9 @@
 # Local video processing artifacts
 /data/processed/
 
+# EPIC-KITCHENS discovery outputs (derived from restricted annotations)
+data/dataset_discovery/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
