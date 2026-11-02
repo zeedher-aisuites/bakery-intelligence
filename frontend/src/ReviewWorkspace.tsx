@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { formatEstimatedCost, type FirstpassCostReport } from "./cost";
 import {
   AnalysisStatus,
   ApiError,
@@ -111,6 +112,8 @@ function Landing(props: { onOpen: (runId: string) => void }): JSX.Element {
   }>>({});
   const [error, setError] = useState<string | null>(null);
   const [heroImage, setHeroImage] = useState<string | null>(null);
+  const [costReports, setCostReports] = useState<Record<string, FirstpassCostReport | null>>({});
+  const [costsSettled, setCostsSettled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -118,15 +121,21 @@ function Landing(props: { onOpen: (runId: string) => void }): JSX.Element {
       if (cancelled) return;
       setItems(rows);
       void Promise.allSettled(rows.map(async (row) => {
-        const bundle = await fetchReviewBundle(row.run_id);
-        return { run_id: row.run_id, bundle };
+        const [bundle, report] = await Promise.all([
+          fetchReviewBundle(row.run_id),
+          fetchArtifactJson<FirstpassCostReport>(row.run_id, "firstpass_report.json").catch(() => null),
+        ]);
+        return { run_id: row.run_id, bundle, report };
       })).then((results) => {
         if (cancelled) return;
         const next: Record<string, {
           frames: number; readings: number; abstentions: number;
         }> = {};
+        const reports: Record<string, FirstpassCostReport | null> = {};
+        for (const row of rows) reports[row.run_id] = null;
         for (const result of results) {
           if (result.status !== "fulfilled") continue;
+          reports[result.value.run_id] = result.value.report;
           const counts = summarizeReview(result.value.bundle);
           next[result.value.run_id] = {
             frames: counts.frames,
@@ -141,6 +150,8 @@ function Landing(props: { onOpen: (runId: string) => void }): JSX.Element {
           }
         }
         setStats(next);
+        setCostReports(reports);
+        setCostsSettled(true);
       });
     }).catch((err: unknown) => {
       if (!cancelled) setError(errorText(err));
@@ -292,6 +303,9 @@ function Landing(props: { onOpen: (runId: string) => void }): JSX.Element {
                 {featuredStats?.abstentions ?? "—"} abstentions
               </span>
             </span>
+            <span className="muted small">
+              {formatEstimatedCost(costReports[featured.run_id], costsSettled)}
+            </span>
             {featured && heroImage && (
               <img
                 className="demo-thumb"
@@ -306,6 +320,7 @@ function Landing(props: { onOpen: (runId: string) => void }): JSX.Element {
       {library.length > 0 && (
         <section aria-label="Analysis library">
           <h2>Analysis library</h2>
+          <p className="muted small">Costs are estimates from recorded usage and configured rates, not provider billing.</p>
           <ul className="run-list">
             {library.map((item) => {
               const row = stats[item.run_id];
@@ -323,6 +338,9 @@ function Landing(props: { onOpen: (runId: string) => void }): JSX.Element {
                       <span>{row?.frames ?? "—"} frames</span>
                       <span>{row?.readings ?? "—"} readings</span>
                       <span>{row?.abstentions ?? "—"} abstentions</span>
+                    </span>
+                    <span className="muted small">
+                      {formatEstimatedCost(costReports[item.run_id], costsSettled)}
                     </span>
                     <span className="btn-ghost">Review</span>
                   </button>
