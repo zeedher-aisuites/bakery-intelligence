@@ -34,6 +34,7 @@ function stageLabel(progress: ProgressInfo | null): string {
 
 export default function UploadWorkflow(props: {
   onOpenReview: (runId: string) => void;
+  onViewQueue?: (runId: string) => void;
 }): JSX.Element {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -310,7 +311,7 @@ export default function UploadWorkflow(props: {
           <p className="stage-label">{stageLabel(progress)}</p>
           <div className="progress-track large">
             <div style={{
-              width: `${progress?.percent ?? (terminal ? 100 : 4)}%`,
+              width: `${progress?.percent ?? (terminal ? 100 : 0)}%`,
             }} />
           </div>
           <dl className="summary-grid">
@@ -347,6 +348,15 @@ export default function UploadWorkflow(props: {
                 onClick={() => props.onOpenReview(job.run_id)}
               >
                 Open evidence review
+              </button>
+            )}
+            {props.onViewQueue && (
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => props.onViewQueue?.(job.run_id)}
+              >
+                View in processing queue
               </button>
             )}
             <button type="button" className="btn-ghost" onClick={reset}>

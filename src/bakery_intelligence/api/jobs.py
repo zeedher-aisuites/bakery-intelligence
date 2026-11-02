@@ -65,6 +65,33 @@ class UnknownWorkflowError(ValueError):
     """The requested workflow is not supported by this service."""
 
 
+class RetryError(ValueError):
+    """A retry request was refused for this job."""
+
+
+BILLABLE_WORKFLOWS: frozenset[str] = frozenset({
+    WORKFLOW_VIDEO_PIPELINE_META,
+})
+
+MAX_RETRY_ATTEMPTS = 3
+
+_VALIDATION_MARKERS = (
+    "VIDEO_TOO_LARGE", "limit is", "exceeds the",
+    "Cannot open video", "UNREADABLE_VIDEO",
+    "UNSUPPORTED_CONTAINER", "Unsupported workflow",
+    "requires a source", "Unknown source",
+)
+
+
+def classify_error(error: str | None) -> str | None:
+    """Bucket a failure message for display, without rewriting it."""
+    if not error:
+        return None
+    if any(marker in error for marker in _VALIDATION_MARKERS):
+        return "validation"
+    return "processing"
+
+
 def new_run_id() -> str:
     """Generate a stable-shaped run identifier."""
     return f"run_{secrets.token_hex(6)}"
@@ -108,6 +135,10 @@ class JobRecord:
             "artifact_ids": list(self.artifact_ids),
             "artifact_sha256": dict(self.artifact_sha256),
             "error": self.error,
+            "error_category": (
+                classify_error(self.error)
+                if self.status == STATUS_FAILED else None),
+            "claimed_by": self.claimed_by,
             "attempts": self.attempts,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -160,6 +191,43 @@ class JobService:
     def get(self, run_id: str) -> JobRecord | None:
         """Return a job record or None when unknown."""
         return self._store.get(run_id)
+
+    def list_jobs(self, status: str | None = None,
+                  limit: int = 50) -> list[JobRecord]:
+        """Return newest-first jobs, optionally in one status."""
+        return self._store.list_jobs(status, limit)
+
+    def retry(self, run_id: str) -> JobRecord:
+        """Requeue one failed non-billable job in place.
+
+        The original record, source, and evidence are preserved;
+        only lifecycle fields reset. Billable workflows are
+        refused: they require a fresh authorized submission.
+        """
+        record = self._store.get(run_id)
+        if record is None:
+            raise RetryError(f"Unknown run id: {run_id!r}.")
+        if record.workflow in BILLABLE_WORKFLOWS:
+            raise RetryError(
+                "Billable workflow jobs are never retried from "
+                "the queue; submit a new authorized analysis "
+                "instead.")
+        if record.status != STATUS_FAILED:
+            raise RetryError(
+                f"Only failed jobs can be retried; this job is "
+                f"{record.status}.")
+        if record.attempts >= MAX_RETRY_ATTEMPTS:
+            raise RetryError(
+                f"Retry limit reached ({MAX_RETRY_ATTEMPTS} "
+                "attempts); inspect the failure before submitting "
+                "a new analysis.")
+        if not self._store.requeue_failed(
+                run_id, utc_now_iso(), BILLABLE_WORKFLOWS,
+                MAX_RETRY_ATTEMPTS):
+            raise RetryError("Job changed state; retry refused.")
+        retried = self._store.get(run_id)
+        assert retried is not None
+        return retried
 
     def list_recent(self, limit: int = 50) -> list[JobRecord]:
         """Return the newest completed runs, newest first."""

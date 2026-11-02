@@ -30,6 +30,7 @@ import {
   type ValidationResult,
   type WeighingEvent,
 } from "./results";
+import ProcessingQueue from "./ProcessingQueue";
 import ReviewApp from "./ReviewWorkspace";
 import UploadWorkflow from "./UploadWorkflow";
 
@@ -57,7 +58,9 @@ const OFFLINE_ACCEPT = ".json,application/json";
 export default function App() {
   const [backend, setBackend] = useState<BackendState>({ kind: "checking" });
   const [workflow, setWorkflow] = useState<string>(WORKFLOW_SMOKE);
-  const [view, setView] = useState<"run" | "review">("review");
+  const [view, setView] = useState<"run" | "review" | "queue">("review");
+  const [queueRunId, setQueueRunId] = useState<string | null>(null);
+  const [queueNonce, setQueueNonce] = useState(0);
   const [homeNonce, setHomeNonce] = useState(0);
   const [reviewRunId, setReviewRunId] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -177,6 +180,13 @@ export default function App() {
             >
               + New analysis
             </button>
+            <button
+              type="button"
+              className={view === "queue" ? "active" : ""}
+              onClick={() => setView("queue")}
+            >
+              Processing queue
+            </button>
           </nav>
         </div>
         <BackendBadge backend={backend} onRetry={() => void checkBackend()} />
@@ -188,6 +198,11 @@ export default function App() {
         onOpenReview={(runId) => {
           setReviewRunId(runId);
           setView("review");
+        }}
+        onViewQueue={(runId) => {
+          setQueueRunId(runId);
+          setQueueNonce((value) => value + 1);
+          setView("queue");
         }}
       />
       <details className="tech-runs legacy-tools">
@@ -262,7 +277,7 @@ export default function App() {
             {isOffline
               ? "Upload a JSON offline bundle (bakery-offline-bundle/1). The worker reconstructs measurements and a draft from its evidence."
               : isPipeline
-                ? "Upload a small video (max 16 MB). The worker stages it, extracts frames at 1 FPS, runs fake inference, and reconstructs a draft."
+                ? "Upload a video (shared upload/pipeline size limit applies). The worker stages it, extracts frames at 1 FPS, runs fake inference, and reconstructs a draft."
                 : "Upload a small test file. The backend stores it, verifies its SHA-256, and records a result artifact. No video is analyzed."}
           </p>
           <label className="field">
@@ -270,7 +285,7 @@ export default function App() {
               {isOffline
                 ? "Evidence bundle (JSON, max 16 MB)"
                 : isPipeline
-                  ? "Video file (max 16 MB)"
+                  ? "Video file"
                   : "Test file (max 16 MB)"}
             </span>
             <input
@@ -354,6 +369,15 @@ export default function App() {
       </main>
       </details>
       </>
+      ) : view === "queue" ? (
+      <ProcessingQueue
+        key={queueNonce}
+        highlightRunId={queueRunId}
+        onOpenReview={(runId) => {
+          setReviewRunId(runId);
+          setView("review");
+        }}
+      />
       ) : (
       <ReviewApp
         key={`${homeNonce}-${reviewRunId ?? "home"}`}

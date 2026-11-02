@@ -156,6 +156,52 @@ class SqliteJobStore:
         ).fetchall()
         return [_row_to_record(row) for row in rows]
 
+    def list_jobs(self, status: str | None, limit: int
+                  ) -> list[JobRecord]:
+        """Return newest-first jobs across statuses (bounded)."""
+        if status is not None and status not in (
+                STATUS_QUEUED, STATUS_RUNNING,
+                STATUS_COMPLETED, STATUS_FAILED):
+            raise ValueError(f"Invalid status filter: {status!r}.")
+        if (isinstance(limit, bool) or not isinstance(limit, int)
+                or not 1 <= limit <= 200):
+            raise ValueError(f"Invalid list limit: {limit!r}.")
+        if status is None:
+            rows = self._cursor().execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC"
+                " LIMIT ?;", (limit,),
+            ).fetchall()
+        else:
+            rows = self._cursor().execute(
+                "SELECT * FROM jobs WHERE status = ?"
+                " ORDER BY created_at DESC LIMIT ?;",
+                (status, limit),
+            ).fetchall()
+        return [_row_to_record(row) for row in rows]
+
+    def requeue_failed(self, run_id: str, now_iso: str,
+                       billable: frozenset[str],
+                       max_attempts: int) -> bool:
+        """Atomically return one failed job to queued.
+
+        Refuses billable workflows and jobs at the attempt
+        ceiling in the same conditional UPDATE that performs
+        the transition, so a concurrent claim cannot race it.
+        """
+        marks = ", ".join("?" for _ in billable) or "''"
+        with self._write_lock:
+            cursor = self._cursor().execute(
+                "UPDATE jobs SET status = ?, claimed_by = NULL,"
+                " claimed_at = NULL, heartbeat_at = NULL,"
+                " error = NULL, updated_at = ?"
+                " WHERE run_id = ? AND status = ?"
+                f" AND workflow NOT IN ({marks})"
+                " AND attempts < ?;",
+                (STATUS_QUEUED, now_iso, run_id, STATUS_FAILED,
+                 *sorted(billable), max_attempts),
+            )
+            return cursor.rowcount == 1
+
     def claim_next(self, worker_id: str, now_iso: str,
                    exclude_workflows: frozenset[str] | None = None,
                    ) -> JobRecord | None:

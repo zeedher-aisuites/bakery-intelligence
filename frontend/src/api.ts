@@ -76,6 +76,30 @@ export async function createAnalysis(
   return (await response.json()) as AnalysisCreated;
 }
 
+export interface JobRecord extends AnalysisStatus {
+  error_category?: string | null;
+  claimed_by?: string | null;
+}
+
+export async function listJobs(
+  status?: string,
+  limit = 50,
+): Promise<JobRecord[]> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (status) query.set("status", status);
+  const response = await fetch(`${API_BASE}/api/jobs?${query}`);
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as JobRecord[];
+}
+
+export async function retryJob(runId: string): Promise<JobRecord> {
+  const response = await fetch(`${API_BASE}/api/jobs/${runId}/retry`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as JobRecord;
+}
+
 export async function fetchAnalysis(runId: string): Promise<AnalysisStatus> {
   const response = await fetch(`${API_BASE}/api/analyses/${runId}`);
   if (!response.ok) throw new ApiError(response.status, await parseError(response));

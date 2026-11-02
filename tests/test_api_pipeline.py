@@ -192,7 +192,10 @@ def test_worker_fails_on_non_video(tmp_path: Path) -> None:
     assert final.artifact_ids == []
 
 
-def test_worker_fails_on_oversized_video(tmp_path: Path) -> None:
+def test_worker_fails_on_oversized_video(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "BAKERY_PIPELINE_MAX_VIDEO_BYTES", str(16 * 1024 * 1024))
     storage, store, service = _stack(tmp_path)
     record = _submit_video(storage, service, b"\x01" * (17 * 1024 * 1024))
     assert run_once(store, storage, "worker-1") == record.run_id

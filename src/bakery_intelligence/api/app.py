@@ -45,6 +45,9 @@ from bakery_intelligence.api.authorization import GrantError
 from bakery_intelligence.api.jobs import (
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_QUEUED,
+    STATUS_RUNNING,
+    RetryError,
     JobService,
     UnknownWorkflowError,
     WORKFLOW_STORAGE_SMOKE,
@@ -67,6 +70,11 @@ from bakery_intelligence.api.storage import (
     validate_object_id,
     validate_run_id,
 )
+from bakery_intelligence.api.limits import (
+    effective_video_max_bytes,
+    pipeline_max_bytes,
+    upload_max_bytes,
+)
 from bakery_intelligence.api.store import SqliteJobStore
 from bakery_intelligence.video.intake import (
     VideoError,
@@ -87,16 +95,12 @@ META_RATES_USD_PER_M = (1.25, 4.25)
 
 
 def max_video_upload_bytes() -> int:
-    """Configurable cap for the real-video upload endpoint."""
-    raw = os.environ.get("BAKERY_MAX_VIDEO_UPLOAD_BYTES")
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if value > 0:
-            return value
-    return 2 * 1024 * 1024 * 1024
+    """Configurable cap for the real-video upload endpoint.
+
+    Delegates to the shared limits module so the upload and
+    pipeline caps cannot drift apart.
+    """
+    return upload_max_bytes()
 
 DEV_ORIGINS = [
     "http://localhost:5173",
@@ -215,11 +219,16 @@ def build_app(storage: StorageBackend | None = None,
                     detail="Grant must be a JSON object.")
             grant_payload = parsed
         content = await file.read()
-        if len(content) > MAX_UPLOAD_BYTES:
+        cap = (effective_video_max_bytes()
+               if workflow in (WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+                               WORKFLOW_VIDEO_PIPELINE_META)
+               else MAX_UPLOAD_BYTES)
+        if len(content) > cap:
             raise HTTPException(
                 status_code=413,
-                detail=(f"Upload exceeds {MAX_UPLOAD_BYTES} bytes; "
-                        "large-file uploads are out of spike scope."),
+                detail=(f"Upload is {len(content)} bytes; "
+                        f"the limit for this workflow is "
+                        f"{cap} bytes. No job was created."),
             )
         object_id = sanitize_filename(file.filename)
         backend.store_source(object_id, io.BytesIO(content))
@@ -290,6 +299,47 @@ def build_app(storage: StorageBackend | None = None,
                 status_code=501,
                 detail="Review workspace requires local storage.")
         return backend.base_dir
+
+    @app.get("/api/jobs")
+    def list_jobs(status: str | None = None,
+                  limit: int = 50) -> list[dict[str, Any]]:
+        """Persisted processing queue across all statuses."""
+        if status is not None and status not in (
+                STATUS_QUEUED, STATUS_RUNNING,
+                STATUS_COMPLETED, STATUS_FAILED):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid status filter: {status!r}.")
+        if isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid list limit: {limit!r}.")
+        try:
+            records = service.list_jobs(status, limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return [record.to_dict() for record in records]
+
+    @app.post("/api/jobs/{run_id}/retry")
+    def retry_job(run_id: str) -> dict[str, Any]:
+        """Requeue one failed non-billable job in place.
+
+        Never invokes inference directly and never retries a
+        billable workflow; the worker claims the job through
+        the normal atomic path.
+        """
+        try:
+            validate_run_id(run_id)
+        except InvalidObjectIdError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if service.get(run_id) is None:
+            raise HTTPException(
+                status_code=404, detail="Unknown run id.")
+        try:
+            record = service.retry(run_id)
+        except RetryError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return record.to_dict()
 
     @app.get("/api/analyses")
     def list_analyses(limit: int = 50) -> list[dict[str, Any]]:
@@ -437,7 +487,7 @@ def build_app(storage: StorageBackend | None = None,
             raise HTTPException(
                 status_code=422,
                 detail="Only MP4 videos are supported here.")
-        cap = max_video_upload_bytes()
+        cap = effective_video_max_bytes()
         tmp_dir = root / UPLOAD_TMP_DIRNAME
         tmp_dir.mkdir(parents=True, exist_ok=True)
         tmp_path = tmp_dir / f"upload-{os.getpid()}-{id(file)}.part"
@@ -521,7 +571,16 @@ def build_app(storage: StorageBackend | None = None,
     def create_upload_analysis(
             object_id: str,
             request: UploadAnalysisRequest) -> dict[str, Any]:
-        _read_upload(object_id)
+        metadata = _read_upload(object_id)
+        size = metadata.get("bytes")
+        limit = pipeline_max_bytes()
+        if isinstance(size, int) and size > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Video is {size} bytes; the pipeline "
+                    f"limit is {limit} bytes. No job was "
+                    "created."))
         if request.workflow not in (
                 WORKFLOW_VIDEO_PIPELINE_OFFLINE,
                 WORKFLOW_VIDEO_PIPELINE_META):
