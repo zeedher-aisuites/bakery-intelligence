@@ -28,6 +28,7 @@ from bakery_intelligence.api.pipeline import (
     FIRSTPASS_REPORT_ARTIFACT,
     PIPELINE_SUMMARY_ARTIFACT,
     PipelineResumeError,
+    run_pipeline_from_path,
     run_pipeline_offline,
 )
 from bakery_intelligence.api.storage import (
@@ -494,6 +495,33 @@ def test_pipeline_tampered_frame_refused(tmp_path: Path) -> None:
     frame.write_bytes(bytes(data))
     with pytest.raises(PipelineResumeError, match="frame 10"):
         run_pipeline_offline(**kwargs)
+
+
+def test_from_path_long_upload_name_keeps_mp4_container(
+        tmp_path: Path) -> None:
+    """Regression: a staged upload id must not truncate `.mp4` to `.m`.
+
+    Mirrors the failed Meta run shape: the stored object id is
+    ``upload_<sha16>_<original stem>.mp4`` (50 chars). Sanitizing
+    the full filename truncated it to 48 chars, leaving a `.m`
+    suffix that intake rejected as an unsupported container.
+    Offline fake inference only; no billable client is involved.
+    """
+    raw = _make_video(tmp_path / "clip.avi").read_bytes()
+    staged = tmp_path / "upload_18e2e3850f6922aa_P35_101_clip_0209_0300.mp4"
+    staged.write_bytes(raw)
+    object_id = staged.name
+    artifacts = run_pipeline_from_path(
+        video_path=staged, video_name=object_id,
+        run_id="run_0123456789ab", source_object_id=object_id,
+        work_dir=tmp_path / "work")
+    summary = json.loads(artifacts[PIPELINE_SUMMARY_ARTIFACT])
+    assert summary["video"]["file_name"].endswith(".mp4")
+    assert summary["source_object_id"] == object_id
+    input_dir = tmp_path / "work" / "input"
+    input_names = [path.name for path in input_dir.iterdir()]
+    assert len(input_names) == 1
+    assert input_names[0].endswith(".mp4")
 
 
 def test_pipeline_stateless_firstpass_debris_refused(

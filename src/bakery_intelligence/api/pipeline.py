@@ -339,6 +339,19 @@ def _diff_json(expected: Any, actual: Any, path: str) -> list[str]:
     return []
 
 
+def _input_filename(video_name: str) -> str:
+    """Build the work-dir input name, preserving the extension.
+
+    The stem is sanitized (and may be truncated) separately from
+    the suffix: sanitizing the full filename truncated long
+    upload ids to 48 chars and mangled `.mp4` into `.m`, which
+    intake then rejected as an unsupported container.
+    """
+    suffix = Path(video_name).suffix.lower()
+    stem = sanitize_stem(Path(video_name).stem)
+    return f"upload_{stem}{suffix}"
+
+
 def _staged_names(video_name: str, source_sha256: str
                   ) -> tuple[str, str]:
     """Recompute the deterministic staged video/sidecar names.
@@ -347,7 +360,7 @@ def _staged_names(video_name: str, source_sha256: str
     client name (sanitized), and staging prefixes the content
     hash. Returns (video_filename, sidecar_filename).
     """
-    input_name = f"upload_{sanitize_stem(video_name)}"
+    input_name = _input_filename(video_name)
     suffix = Path(input_name).suffix.lower()
     stem = sanitize_stem(Path(input_name).stem)
     final = f"video_{source_sha256[:16]}_{stem}{suffix}"
@@ -856,7 +869,7 @@ def _run_pipeline_core(
         _reset_stage_dirs(work_dir)
         input_dir = work_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
-        input_path = input_dir / f"upload_{sanitize_stem(video_name)}"
+        input_path = input_dir / _input_filename(video_name)
         with staged_input.open("rb") as src, input_path.open(
                 "wb") as dst:
             shutil.copyfileobj(src, dst, 1024 * 1024)
