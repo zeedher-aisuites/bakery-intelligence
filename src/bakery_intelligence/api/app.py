@@ -42,6 +42,21 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from bakery_intelligence.api.authorization import GrantError
+from bakery_intelligence.adversarial.service import (
+    RecipeReviewService,
+)
+from bakery_intelligence.adversarial.live import (
+    GenerateRecipeRequest,
+    LiveConfigError,
+    _load_local_env,
+)
+from bakery_intelligence.adversarial.observations import (
+    ObservationReviewError,
+)
+from bakery_intelligence.inference.firstpass import InferenceError
+from bakery_intelligence.adversarial.store import (
+    RecipeReviewError,
+)
 from bakery_intelligence.api.jobs import (
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -134,6 +149,63 @@ class UploadAnalysisRequest(BaseModel):
     grant: dict[str, Any] | None = None
 
 
+class RecipeCorrections(BaseModel):
+    """Chef edits to the editable recipe draft."""
+
+    ingredients: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
+    reviewer: str
+
+
+class ObservationCorrection(BaseModel):
+    """One human decision on an observation review task."""
+
+    task_id: str
+    action: str
+    human_value: Any = None
+    reviewer: str
+
+
+class ObservationUndo(BaseModel):
+    """Revert the latest decision on a task without erasing history."""
+
+    task_id: str
+    reviewer: str
+
+
+class ObservationClassification(BaseModel):
+    """Human classification of one frame, from the viewer."""
+
+    frame_index: int
+    action: str
+    human_value: Any = None
+    reviewer: str
+
+
+class RecipeDecisionRequest(BaseModel):
+    """Explicit human decision on one draft version."""
+
+    decision: str
+    reviewer: str
+    notes: str | None = None
+
+
+class CulinaryEnrichRequest(BaseModel):
+    """Explicitly trigger one culinary enrichment batch."""
+
+    max_frames: int = 5
+    confirmed: bool = False
+    frame_indices: list[int] | None = None
+
+
+class CulinaryRequeueRequest(BaseModel):
+    """Explicitly authorize reprocessing of terminal-failed frames."""
+
+    frame_indices: list[int]
+    reason: str
+    reviewer: str
+
+
 class ReviewSubmission(BaseModel):
     """One human review decision for a single frame."""
 
@@ -167,6 +239,7 @@ def build_app(storage: StorageBackend | None = None,
               storage_dir: Path | str | None = None,
               db_path: Path | str | None = None) -> FastAPI:
     """Create the FastAPI application with injected dependencies."""
+    _load_local_env()
     backend = storage or LocalStorageBackend(
         storage_dir or default_storage_dir())
     if db_path is None and isinstance(backend, LocalStorageBackend):
@@ -376,6 +449,201 @@ def build_app(storage: StorageBackend | None = None,
         except ObjectNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         return Response(content=data, media_type="image/jpeg")
+
+    @app.get("/api/analyses/{run_id}/observation-review")
+    def get_observation_review(run_id: str) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        return RecipeReviewService(backend).observation_queue(record)
+
+    @app.post("/api/analyses/{run_id}/observation-review/corrections")
+    def save_observation_correction(
+            run_id: str,
+            request: ObservationCorrection) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        try:
+            return RecipeReviewService(backend).save_observation_correction(
+                record, request.task_id, request.action,
+                request.human_value, request.reviewer)
+        except ObservationReviewError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    @app.post("/api/analyses/{run_id}/observation-review/corrections/undo")
+    def undo_observation_correction(
+            run_id: str,
+            request: ObservationUndo) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        try:
+            return RecipeReviewService(backend).undo_observation_correction(
+                record, request.task_id, request.reviewer)
+        except ObservationReviewError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    @app.post("/api/analyses/{run_id}/observation-review/classifications")
+    def save_observation_classification(
+            run_id: str,
+            request: ObservationClassification) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        try:
+            return RecipeReviewService(backend).save_frame_classification(
+                record, request.frame_index, request.action,
+                request.human_value, request.reviewer)
+        except ObservationReviewError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    @app.get("/api/analyses/{run_id}/consolidated-evidence")
+    def get_consolidated_evidence(run_id: str) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        return RecipeReviewService(backend).consolidated(record)
+
+    @app.get("/api/analyses/{run_id}/culinary/observations")
+    def get_culinary_observations(run_id: str) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        return RecipeReviewService(backend).culinary_status(record)
+
+    @app.post("/api/analyses/{run_id}/culinary/enrich")
+    def enrich_culinary_observations(
+            run_id: str,
+            request: CulinaryEnrichRequest) -> dict[str, Any]:
+        from bakery_intelligence.adversarial.culinary import (
+            CulinaryError,
+        )
+        from bakery_intelligence.adversarial.store import (
+            RecipeReviewError,
+        )
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        if (isinstance(request.max_frames, bool)
+                or not 1 <= request.max_frames <= 51):
+            raise HTTPException(
+                status_code=422,
+                detail=f"max_frames must be between 1 and 51, "
+                       f"got {request.max_frames!r}.")
+        if request.frame_indices is not None and (
+                not isinstance(request.frame_indices, list)
+                or len(request.frame_indices) > 51
+                or any(isinstance(index, bool)
+                       or not isinstance(index, int) or index < 0
+                       for index in request.frame_indices)):
+            raise HTTPException(
+                status_code=422,
+                detail="frame_indices must be a list of up to 51 "
+                       "non-negative frame indices.")
+        try:
+            return RecipeReviewService(backend).enrich_culinary(
+                record, max_frames=request.max_frames,
+                confirmed=request.confirmed,
+                frame_indices=request.frame_indices)
+        except (CulinaryError, RecipeReviewError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    @app.post("/api/analyses/{run_id}/culinary/requeue")
+    def requeue_culinary_frames(
+            run_id: str,
+            request: CulinaryRequeueRequest) -> dict[str, Any]:
+        from bakery_intelligence.adversarial.culinary import (
+            CulinaryError,
+        )
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        try:
+            return RecipeReviewService(backend).requeue_culinary_frames(
+                record, frame_indices=request.frame_indices,
+                reason=request.reason, reviewer=request.reviewer)
+        except CulinaryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    @app.get("/api/analyses/{run_id}/temporal-events")
+    def get_temporal_events(run_id: str) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        return RecipeReviewService(backend).temporal_events(record)
+
+    @app.get("/api/analyses/{run_id}/recipe/readiness")
+    def get_recipe_readiness(run_id: str) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        return RecipeReviewService(backend).readiness(record)
+
+    @app.post("/api/analyses/{run_id}/recipe/generate")
+    def generate_recipe(
+            run_id: str,
+            request: GenerateRecipeRequest | None = None,
+    ) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        try:
+            return RecipeReviewService(backend).generate_recipe(
+                record, request or GenerateRecipeRequest())
+        except LiveConfigError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except InferenceError as exc:
+            raise HTTPException(status_code=502, detail=(
+                f"Live provider error ({exc.code}); no simulated "
+                "fallback was used."))
+
+    @app.get("/api/analyses/{run_id}/recipe")
+    def get_recipe_review(run_id: str) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        root = _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        return RecipeReviewService(backend).get_or_create(record)
+
+    @app.get("/api/analyses/{run_id}/recipe/evidence")
+    def get_recipe_evidence(run_id: str) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        return RecipeReviewService(backend).evidence(record)
+
+    @app.post("/api/analyses/{run_id}/recipe/corrections")
+    def save_recipe_corrections(
+            run_id: str,
+            request: RecipeCorrections) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        service = RecipeReviewService(backend)
+        service.get_or_create(record)
+        try:
+            return service.save_corrections(
+                record,
+                request.ingredients, request.steps,
+                request.reviewer)
+        except RecipeReviewError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    @app.post("/api/analyses/{run_id}/recipe/decisions")
+    def save_recipe_decision(
+            run_id: str,
+            request: RecipeDecisionRequest) -> dict[str, Any]:
+        record = _require_completed(run_id)
+        _review_root()
+        assert isinstance(backend, LocalStorageBackend)
+        service = RecipeReviewService(backend)
+        service.get_or_create(record)
+        try:
+            return service.store.decide(
+                run_id, request.decision, request.reviewer,
+                request.notes)
+        except RecipeReviewError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     @app.get("/api/analyses/{run_id}/reviews")
     def get_reviews(run_id: str) -> dict[str, Any]:
