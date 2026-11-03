@@ -1,25 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, listJobs, retryJob, type JobRecord } from "./api";
+import {
+  ApiError, fetchRecipe, listJobs, retryJob, type JobRecord,
+} from "./api";
 import {
   canRetry,
   countByStatus,
   displaySourceName,
+  errorSummary,
   filterJobs,
   hasActiveJobs,
-  retryHint,
   statusLabel,
 } from "./queue";
 
 const POLL_MS = 3000;
 const FILTERS = [
   { id: "all", label: "All" },
-  { id: "queued", label: "Queued" },
-  { id: "running", label: "Running" },
-  { id: "completed", label: "Completed" },
+  { id: "queued", label: "Waiting" },
+  { id: "running", label: "Processing" },
+  { id: "completed", label: "Ready" },
   { id: "failed", label: "Failed" },
 ] as const;
 
-function fmtDate(value?: string): string {
+function fmtDate(value?: string | null): string {
   if (!value) return "—";
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
@@ -35,12 +37,15 @@ function pillClass(status: string): string {
 export default function ProcessingQueue(props: {
   highlightRunId?: string | null;
   onOpenReview: (runId: string) => void;
+  onNewAnalysis: () => void;
 }): JSX.Element {
   const [jobs, setJobs] = useState<JobRecord[] | null>(null);
   const [filter, setFilter] = useState<string>("all");
   const [connError, setConnError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [recipes, setRecipes] = useState<Record<string, "ready" | "absent">>(
+    {});
   const timer = useRef<number | null>(null);
 
   const load = useCallback(async () => {
@@ -52,7 +57,7 @@ export default function ProcessingQueue(props: {
       setConnError(
         err instanceof ApiError
           ? `Backend unavailable (HTTP ${err.status}): ${err.message}`
-          : "Backend unavailable. Showing the last known queue state.",
+          : "Backend unavailable. Showing the last known recipes.",
       );
     }
   }, []);
@@ -65,6 +70,33 @@ export default function ProcessingQueue(props: {
       timer.current = null;
     };
   }, [load]);
+
+  // A completed analysis only means evidence is ready. Probe the real
+  // persisted recipe state so "ready" never promises a missing recipe.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const pending = (jobs ?? []).filter((job) => job.status === "completed"
+        && recipes[job.run_id] === undefined);
+      for (const job of pending) {
+        try {
+          const state = await fetchRecipe(job.run_id);
+          if (cancelled) return;
+          setRecipes((prev) => prev[job.run_id] === undefined
+            ? {
+              ...prev,
+              [job.run_id]: state.generation != null ? "ready" : "absent",
+            }
+            : prev);
+        } catch {
+          if (cancelled) return;
+          setRecipes((prev) => prev[job.run_id] === undefined
+            ? { ...prev, [job.run_id]: "absent" } : prev);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [jobs, recipes]);
 
   async function onRetry(runId: string): Promise<void> {
     setRetrying(runId);
@@ -90,11 +122,10 @@ export default function ProcessingQueue(props: {
       <section className="card queue-card">
         <div className="queue-head">
           <div>
-            <h2>Processing queue</h2>
+            <h2>My recipes</h2>
             <p className="muted">
-              Persisted jobs from the backend. This view survives a
-              browser refresh: queued work stays visible even when
-              no worker is currently running.
+              Track your recipes as they are prepared, and review
+              the results when they&apos;re ready.
             </p>
           </div>
           <button
@@ -107,18 +138,14 @@ export default function ProcessingQueue(props: {
         </div>
 
         {connError && (
-          <p className="error" role="alert">
-            {connError} Retrying automatically every{" "}
-            {POLL_MS / 1000} seconds.
-          </p>
+          <p className="error" role="alert">{connError}</p>
         )}
         {retryError && (
           <p className="error" role="alert">{retryError}</p>
         )}
-        {jobs !== null && !active && (
+        {jobs !== null && !active && jobs.length > 0 && (
           <p className="muted small" role="status">
-            No job is currently queued or running. New uploads will
-            appear here as queued until a worker claims them.
+            Nothing is being prepared right now.
           </p>
         )}
 
@@ -138,22 +165,32 @@ export default function ProcessingQueue(props: {
         </div>
 
         {jobs === null && !connError && (
-          <p className="muted">Loading processing queue…</p>
+          <p className="muted">Loading your recipes…</p>
         )}
         {jobs !== null && visible.length === 0 && (
           <div className="empty">
-            <h3>No jobs in this view</h3>
+            <h3>
+              {jobs.length === 0 ? "No recipes yet" : "No recipes here"}
+            </h3>
             <p>
               {jobs.length === 0
-                ? "No analysis has been submitted yet. Upload a video to create the first queued job."
-                : "No persisted job matches this status filter."}
+                ? "Upload a cooking video to prepare your first recipe."
+                : "No recipes match this filter."}
             </p>
+            {jobs.length === 0 && (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={props.onNewAnalysis}
+              >
+                Start a new analysis
+              </button>
+            )}
           </div>
         )}
 
         <ul className="queue-list">
           {visible.map((job) => {
-            const hint = retryHint(job);
             const highlighted = props.highlightRunId === job.run_id;
             return (
               <li
@@ -170,31 +207,29 @@ export default function ProcessingQueue(props: {
                   )}
                 </div>
                 <dl className="queue-facts">
-                  <div><dt>Run ID</dt><dd><code>{job.run_id}</code></dd></div>
-                  <div><dt>Workflow</dt><dd><code>{job.workflow}</code></dd></div>
                   <div><dt>Created</dt><dd>{fmtDate(job.created_at)}</dd></div>
-                  <div><dt>Updated</dt><dd>{fmtDate(job.updated_at ?? undefined)}</dd></div>
-                  <div><dt>Attempts</dt><dd>{job.attempts ?? 0}</dd></div>
                 </dl>
                 {job.status === "queued" && (
+                  <p className="muted small">Waiting to begin.</p>
+                )}
+                {job.status === "running" && (
                   <p className="muted small">
-                    Accepted and persisted. Waiting for a worker to
-                    claim this job; it is not processing yet.
+                    Being prepared — progress updates automatically.
+                  </p>
+                )}
+                {job.status === "completed" && (
+                  <p className="muted small">
+                    {recipes[job.run_id] === "ready"
+                      ? "Recipe ready — review draft."
+                      : "Analysis ready — review findings."}
                   </p>
                 )}
                 {job.status === "failed" && (
                   <div className="queue-error">
                     <p className="error" role="alert">
-                      {job.error ?? "Analysis failed without a recorded message."}
+                      {errorSummary(job)
+                        ?? "This recipe could not be prepared."}
                     </p>
-                    {hint && <p className="muted small">{hint}</p>}
-                    {job.workflow === "video_pipeline_meta" && (
-                      <p className="muted small">
-                        Operator action: inspect the failure, then
-                        submit a new authorized analysis. The
-                        original failed record is preserved.
-                      </p>
-                    )}
                   </div>
                 )}
                 <div className="queue-actions">
@@ -204,7 +239,8 @@ export default function ProcessingQueue(props: {
                       className="btn-primary"
                       onClick={() => props.onOpenReview(job.run_id)}
                     >
-                      Open completed analysis
+                      {recipes[job.run_id] === "ready"
+                        ? "Review recipe" : "Review findings"}
                     </button>
                   )}
                   {canRetry(job) && (
@@ -214,7 +250,7 @@ export default function ProcessingQueue(props: {
                       disabled={retrying === job.run_id}
                       onClick={() => void onRetry(job.run_id)}
                     >
-                      {retrying === job.run_id ? "Requeueing…" : "Retry job"}
+                      {retrying === job.run_id ? "Retrying…" : "Retry"}
                     </button>
                   )}
                 </div>
@@ -223,8 +259,7 @@ export default function ProcessingQueue(props: {
           })}
         </ul>
         <p className="muted small">
-          Status refreshes automatically while this page is open.
-          Completed results open in the evidence review workspace.
+          Your recipe progress updates automatically.
         </p>
       </section>
     </div>

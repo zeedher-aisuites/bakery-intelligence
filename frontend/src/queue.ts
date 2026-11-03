@@ -23,7 +23,9 @@ export function isQueueStatus(value: string): value is QueueStatus {
   return (QUEUE_STATUSES as readonly string[]).includes(value);
 }
 
-export function displaySourceName(job: QueueJob): string {
+export function displaySourceName(
+  job: Pick<QueueJob, "source_object_id">,
+): string {
   const raw = job.source_object_id ?? "Unknown source";
   // Stored upload ids look like upload_<sha16>_<original name>.
   const match = /^upload_[0-9a-f]{16}_(.+)$/.exec(raw);
@@ -33,35 +35,51 @@ export function displaySourceName(job: QueueJob): string {
 export function statusLabel(job: QueueJob): string {
   switch (job.status) {
     case "queued":
-      return "Queued — waiting for a worker";
+      return "Waiting";
     case "running":
-      return job.claimed_by
-        ? `Running — claimed by ${job.claimed_by}`
-        : "Running";
+      return "Processing";
     case "completed":
-      return "Completed";
+      return "Ready";
     case "failed":
-      return job.error_category === "validation"
-        ? "Failed — validation"
-        : "Failed — processing";
+      return "Failed";
     default:
       return job.status;
   }
 }
 
 export function canRetry(job: QueueJob): boolean {
-  return job.status === "failed" && job.workflow !== META_WORKFLOW;
+  if (job.status !== "failed") return false;
+  if (job.workflow === META_WORKFLOW) return false;
+  return job.error_category !== "validation";
 }
 
 export function retryHint(job: QueueJob): string | null {
   if (job.status !== "failed") return null;
   if (job.workflow === META_WORKFLOW) {
     return (
-      "Paid Meta jobs are never retried automatically. "
-      + "Submit a new authorized analysis to run this video again."
+      "Paid analyses are never retried automatically. "
+      + "Start a new analysis to run this video again; "
+      + "the failed record is kept."
     );
   }
   return null;
+}
+
+export function errorSummary(job: QueueJob): string | null {
+  if (job.status !== "failed") return null;
+  if (job.workflow === META_WORKFLOW) {
+    return (
+      "This paid analysis could not finish. Paid runs are "
+      + "never retried automatically."
+    );
+  }
+  if (job.error_category === "validation") {
+    return (
+      "This video could not be analyzed. Try a different "
+      + "MP4 recording — the original file is kept."
+    );
+  }
+  return "Processing could not finish. Your video is kept.";
 }
 
 export function hasActiveJobs(jobs: QueueJob[]): boolean {
