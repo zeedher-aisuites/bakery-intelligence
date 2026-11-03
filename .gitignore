@@ -255,3 +255,11 @@ frontend/node_modules/
 frontend/dist/
 frontend/.env
 frontend/.env.local
+
+# Bakery Intelligence: native-video experiment outputs are private
+# evidence and must never be committed. Experiment scripts
+# (experiments/*.py) stay tracked; only run-result directories
+# below are excluded, so JSON/TXT elsewhere keep their meaning.
+experiments/native_video_understanding/
+experiments/native_video_wonder/
+experiments/native_video_baseten/
