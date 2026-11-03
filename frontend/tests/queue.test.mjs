@@ -7,6 +7,7 @@ import {
   canRetry,
   countByStatus,
   displaySourceName,
+  errorSummary,
   filterJobs,
   hasActiveJobs,
   retryHint,
@@ -23,7 +24,12 @@ const metaFailed = {
   error: "Pipeline video is 9 bytes; limit is 1.",
   error_category: "validation", attempts: 1,
 };
-const offlineFailed = { ...metaFailed, workflow: "video_pipeline_offline" };
+const offlineFailed = {
+  ...metaFailed, workflow: "video_pipeline_offline",
+  error: "Artifact read-back mismatch.",
+  error_category: "processing", attempts: 1,
+};
+const offlineInvalid = { ...offlineFailed, error_category: "validation" };
 
 test("displaySourceName strips the stored upload prefix", () => {
   assert.equal(displaySourceName(queued), "clip.mp4");
@@ -35,20 +41,38 @@ test("displaySourceName strips the stored upload prefix", () => {
     "Unknown source");
 });
 
-test("statusLabel never presents queued as processing", () => {
-  assert.match(statusLabel(queued), /waiting for a worker/i);
-  assert.match(
+test("statusLabel uses chef-friendly labels without internals", () => {
+  assert.equal(statusLabel(queued), "Waiting");
+  assert.equal(
     statusLabel({ ...queued, status: "running", claimed_by: "worker-1" }),
-    /worker-1/);
-  assert.match(statusLabel(metaFailed), /validation/i);
+    "Processing");
+  assert.equal(
+    statusLabel({ ...queued, status: "completed" }), "Ready");
+  assert.equal(statusLabel(metaFailed), "Failed");
 });
 
-test("retry is offered only for failed non-billable jobs", () => {
+test("retry is offered only for safe non-billable recovery", () => {
   assert.equal(canRetry(offlineFailed), true);
   assert.equal(canRetry(metaFailed), false);
+  assert.equal(canRetry(offlineInvalid), false);
   assert.equal(canRetry(queued), false);
   assert.match(retryHint(metaFailed) ?? "", /never retried/i);
   assert.equal(retryHint(offlineFailed), null);
+});
+
+test("errorSummary explains failures without internals", () => {
+  assert.match(errorSummary(metaFailed) ?? "", /never retried/i);
+  assert.match(errorSummary(offlineInvalid) ?? "", /different MP4/i);
+  assert.match(errorSummary(offlineInvalid) ?? "", /kept/i);
+  assert.match(errorSummary(offlineFailed) ?? "", /kept/i);
+  assert.equal(errorSummary(queued), null);
+  for (const summary of [
+    errorSummary(metaFailed),
+    errorSummary(offlineInvalid),
+    errorSummary(offlineFailed),
+  ]) {
+    assert.doesNotMatch(summary ?? "", /worker/i);
+  }
 });
 
 test("filter, counts, and active detection", () => {

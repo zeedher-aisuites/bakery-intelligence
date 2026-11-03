@@ -238,3 +238,23 @@ test("export builders preserve model values and reviews", () => {
   assert.equal(
     parsed.rows[0].effective_provenance, "human-corrected");
 });
+
+test("effectiveReading degrades unknown stored decisions to gaps", () => {
+  const odd = frame({
+    review: {
+      frame_index: 0,
+      decision: "archived",
+      value: 30.0,
+      notes: null,
+      reviewer: null,
+      updated_at: "2026-01-01T00:00:00Z",
+      schema_version: "review-annotations/1",
+    },
+  });
+  const reading = effectiveReading(odd);
+  assert.equal(reading.value, null);
+  assert.equal(reading.provenance, "unknown");
+  const rows = buildRecipeRows(bundle([odd]));
+  assert.equal(rows[0].value, null);
+  assert.equal(rows[0].provenance, "unknown");
+});
