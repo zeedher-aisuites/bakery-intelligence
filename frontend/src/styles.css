@@ -900,3 +900,117 @@ button.btn-primary:disabled,
   margin: 0.3rem 0;
   font-size: 0.9rem;
 }
+
+/* Recipe families: one card per lineage, latest first. */
+.family-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.family-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.family-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.family-versions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.family-versions > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.version-row {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: flex-start;
+  text-align: left;
+  background: var(--canvas);
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.version-row strong {
+  overflow-wrap: anywhere;
+}
+
+.version-actions {
+  flex-shrink: 0;
+  padding-top: 0.5rem;
+}
+
+.family-history summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.family-history .family-versions {
+  margin-top: 0.5rem;
+}
+
+.rename-btn {
+  white-space: nowrap;
+}
+
+.rename-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.rename-editor input[type="text"] {
+  font: inherit;
+  min-width: min(16rem, 40vw);
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.btn-sm {
+  font-size: 0.85rem;
+  padding: 0.35rem 0.75rem;
+}
+
+@media (max-width: 560px) {
+  .family-versions > li {
+    flex-direction: column;
+  }
+
+  .version-actions {
+    padding-top: 0;
+  }
+
+  .rename-editor input[type="text"] {
+    min-width: 0;
+    flex: 1;
+  }
+}

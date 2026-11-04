@@ -156,6 +156,142 @@ class SqliteJobStore:
         ).fetchall()
         return [_row_to_record(row) for row in rows]
 
+    def list_jobs(self, status: str | None, limit: int
+                  ) -> list[JobRecord]:
+        """Return newest-first jobs across statuses (bounded)."""
+        if status is not None and status not in (
+                STATUS_QUEUED, STATUS_RUNNING,
+                STATUS_COMPLETED, STATUS_FAILED):
+            raise ValueError(f"Invalid status filter: {status!r}.")
+        if (isinstance(limit, bool) or not isinstance(limit, int)
+                or not 1 <= limit <= 200):
+            raise ValueError(f"Invalid list limit: {limit!r}.")
+        if status is None:
+            rows = self._cursor().execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC"
+                " LIMIT ?;", (limit,),
+            ).fetchall()
+        else:
+            rows = self._cursor().execute(
+                "SELECT * FROM jobs WHERE status = ?"
+                " ORDER BY created_at DESC LIMIT ?;",
+                (status, limit),
+            ).fetchall()
+        return [_row_to_record(row) for row in rows]
+
+    def requeue_billable_failed(
+            self, run_id: str, now_iso: str,
+            operator_note: str,
+            max_attempts: int = 3) -> bool:
+        """Atomically return one failed BILLABLE job to queued.
+
+        Explicit operator recovery only: the caller must name
+        the run and record why the retry is safe (persisted
+        stage outputs are reused, never rebilled). Refuses
+        non-failed jobs and jobs at the attempt ceiling in the
+        same conditional UPDATE, so a concurrent claim cannot
+        race it. The previous error is preserved inline.
+        """
+        if not operator_note.strip():
+            raise ValueError(
+                "Billable requeue requires an operator note.")
+        with self._write_lock:
+            record = self.get(run_id)
+            if record is None or record.status != STATUS_FAILED:
+                return False
+            if record.attempts >= max_attempts:
+                return False
+            previous = (record.error or "no error recorded")[:500]
+            cursor = self._cursor().execute(
+                "UPDATE jobs SET status = ?, claimed_by = NULL,"
+                " claimed_at = NULL, heartbeat_at = NULL,"
+                " error = ?, updated_at = ?, attempts = ?"
+                " WHERE run_id = ? AND status = ?"
+                " AND attempts < ?;",
+                (STATUS_QUEUED,
+                 f"[operator requeue: {operator_note.strip()}] "
+                 f"previous: {previous}", now_iso,
+                 record.attempts + 1, run_id, STATUS_FAILED,
+                 max_attempts),
+            )
+            return cursor.rowcount == 1
+
+    def amend_grant_max_requests(
+            self, run_id: str, additional_calls: int,
+            operator_note: str) -> tuple[int, int] | None:
+        """Raise one failed job's grant by a documented amount.
+
+        Explicit operator action only: used when a verified
+        provider constraint (such as mandatory ASR chunking)
+        adds billable calls the original grant did not foresee.
+        The confirmation sentence is rebuilt so the amended
+        grant still parses. Returns (old, new) maxima, or None
+        when the job is not failed.
+        """
+        from bakery_intelligence.api.authorization import (
+            confirmation_sentence,
+            parse_grant,
+        )
+
+        if additional_calls < 1:
+            raise ValueError(
+                "Grant amendment needs a positive call count.")
+        if not operator_note.strip():
+            raise ValueError(
+                "Grant amendment requires an operator note.")
+        with self._write_lock:
+            record = self.get(run_id)
+            if record is None or record.status != STATUS_FAILED:
+                return None
+            if record.grant_json is None:
+                raise ValueError(
+                    f"Run {run_id} has no grant to amend.")
+            payload = dict(json.loads(record.grant_json))
+            grant = parse_grant(payload)
+            new_max = grant.max_requests + additional_calls
+            payload["max_requests"] = new_max
+            payload["confirmation"] = confirmation_sentence(
+                grant.workflow, grant.model, new_max,
+                grant.token_budget, grant.max_frames,
+                grant.operator)
+            parse_grant(payload)
+            previous = (record.error or "no error recorded")[:400]
+            cursor = self._cursor().execute(
+                "UPDATE jobs SET grant_json = ?, error = ?,"
+                " updated_at = ?"
+                " WHERE run_id = ? AND status = ?;",
+                (json.dumps(payload),
+                 f"[grant amended +{additional_calls}: "
+                 f"{operator_note.strip()}] previous: {previous}",
+                 record.updated_at, run_id, STATUS_FAILED),
+            )
+            if cursor.rowcount != 1:
+                return None
+            return grant.max_requests, new_max
+
+    def requeue_failed(self, run_id: str, now_iso: str,
+                       billable: frozenset[str],
+                       max_attempts: int) -> bool:
+        """Atomically return one failed job to queued.
+
+        Refuses billable workflows and jobs at the attempt
+        ceiling in the same conditional UPDATE that performs
+        the transition, so a concurrent claim cannot race it.
+        """
+        marks = ", ".join("?" for _ in billable) or "''"
+        with self._write_lock:
+            cursor = self._cursor().execute(
+                "UPDATE jobs SET status = ?, claimed_by = NULL,"
+                " claimed_at = NULL, heartbeat_at = NULL,"
+                " error = NULL, updated_at = ?"
+                " WHERE run_id = ? AND status = ?"
+                f" AND workflow NOT IN ({marks})"
+                " AND attempts < ?;",
+                (STATUS_QUEUED, now_iso, run_id, STATUS_FAILED,
+                 *sorted(billable), max_attempts),
+            )
+            return cursor.rowcount == 1
+
     def claim_next(self, worker_id: str, now_iso: str,
                    exclude_workflows: frozenset[str] | None = None,
                    ) -> JobRecord | None:

@@ -198,6 +198,31 @@ export function effectiveReading(frame: ReviewFrame): EffectiveReading {
         pill: "pill-pending",
         note: "Human marked this frame uncertain.",
       };
+    default:
+      return {
+        value: null,
+        provenance: "unknown",
+        pill: "pill-pending",
+        note: "Stored review has an unrecognized decision.",
+      };
+  }
+}
+
+/**
+ * Evidence-state badge for a reading provenance. Mirrors the
+ * Confirm/Correct distinction in effectiveReading: only a
+ * confirmation is verification. Rejected and uncertain frames
+ * keep their existing pill treatment (null = no badge).
+ */
+export function readingBadge(
+  provenance: ReadingProvenance,
+): string | null {
+  switch (provenance) {
+    case "human-verified": return "badge badge-verified";
+    case "human-corrected": return "badge badge-corrected";
+    case "ai-extracted": return "badge badge-ai";
+    case "unknown": return "badge badge-unknown";
+    default: return null;
   }
 }
 

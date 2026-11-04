@@ -193,6 +193,33 @@ Python tests use isolated temporary storage; they never touch
 - Landing statistics fetch one bundle per listed run, which is
   slow with many runs.
 
+## AI-Executed Chef Review Validation
+
+The Phase 2C `bakery_demo_v1` chef-review workflow was executed
+autonomously by an AI agent driving Playwright against the real
+local application (backend + frontend, no mocks). The agent
+assumed the role of a professional bakery chef: it played both
+demo clips, navigated evidence timestamps, corrected 15
+ingredient identities, verified 49 claims, marked the remainder
+cannot-determine, supplied 7 measurement unit/amount pairs, and
+reviewed all 42 preparation steps and both open questions,
+reaching 87 of 87 reviewed with identical state after a browser
+reload. All decisions used the application's existing reviewer
+mechanism and review states (`ai-extracted`, `chef-supplied`,
+`human-corrected`, `human-verified`, `unknown`) under reviewer
+`ai-chef`; no test-only identities or states were introduced.
+
+This exercise validates the review workflow, not the recipe.
+Chef-supplied values may reflect AI culinary judgment rather
+than directly observed measurements, and the resulting review
+does not constitute independent human validation. No
+independently verified ground-truth recipe was available. The
+Playwright journey is reproducible via `node qa/chef_review.mjs`
+(with the backend on :8001 and `VITE_API_BASE`-pointed vite on
+:5174); screenshots and the QA log live in git-ignored
+`qa/shots/`. Review records persist in git-ignored
+`runs_api/fusion_reviews/bakery_demo_v1.json`.
+
 ## Large-video resource behavior
 
 - **In-memory loading (current behavior):** pipeline executors

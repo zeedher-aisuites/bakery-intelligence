@@ -181,8 +181,17 @@ class MetaSparkClient:
         image_paths: Sequence[Path],
         api_key: str,
         max_output_tokens: int,
+        response_schema: dict[str, Any] | None = None,
+        response_schema_name: str | None = None,
     ) -> InferenceResponse:
-        """Send one multimodal request; map outcomes to data/codes."""
+        """Send one multimodal request; map outcomes to data/codes.
+
+        The Responses structured-output schema defaults to the
+        verified frame-observation contract. Recipe callers pass
+        their own JSON schema so the constraint matches the prompt;
+        reusing the observation schema for a recipe prompt is an
+        incompatible configuration that cannot yield valid output.
+        """
         if not image_paths:
             raise InferenceError(
                 "EMPTY_REQUEST", "At least one image required.")
@@ -217,6 +226,9 @@ class MetaSparkClient:
                 "type": "input_image",
                 "image_url": f"data:{mime};base64,{encoded}",
             })
+        schema_name = response_schema_name or OBSERVATION_SCHEMA_NAME
+        schema = (response_schema if response_schema is not None
+                  else OBSERVATION_JSON_SCHEMA)
         client = self._require_client(api_key)
         start = self.clock()
         try:
@@ -228,8 +240,8 @@ class MetaSparkClient:
                 text={
                     "format": {
                         "type": "json_schema",
-                        "name": OBSERVATION_SCHEMA_NAME,
-                        "schema": OBSERVATION_JSON_SCHEMA,
+                        "name": schema_name,
+                        "schema": schema,
                     }
                 },
             )

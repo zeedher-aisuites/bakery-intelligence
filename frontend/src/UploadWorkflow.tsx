@@ -2,15 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import {
   ProgressInfo,
   UploadInfo,
+  createRecipe,
   createUploadAnalysis,
   fetchProgress,
   formatBytes,
   uploadVideo,
 } from "./api";
 import {
-  MAX_AUTHORIZED_COST_USD,
-  META_MODEL,
-  OFFLINE_WORKFLOW,
+  META_WORKFLOW,
   buildMetaGrant,
   formatDuration,
 } from "./upload";
@@ -34,16 +33,20 @@ function stageLabel(progress: ProgressInfo | null): string {
 
 export default function UploadWorkflow(props: {
   onOpenReview: (runId: string) => void;
+  onViewQueue?: (runId: string) => void;
+  onOpenRecipe?: (recipeId: string) => void;
 }): JSX.Element {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState<number | null>(null);
   const [upload, setUpload] = useState<UploadInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [recipeName, setRecipeName] = useState("");
+  const [language, setLanguage] = useState("en");
   const [confirmPaid, setConfirmPaid] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [job, setJob] = useState<{
-    run_id: string; workflow: string;
+    run_id: string; workflow: string; recipe_id: string | null;
   } | null>(null);
   const [progress, setProgress] = useState<ProgressInfo | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -88,19 +91,44 @@ export default function UploadWorkflow(props: {
     }
   }
 
-  async function startAnalysis(workflow: string): Promise<void> {
+  async function startRecipeAnalysis(): Promise<void> {
     if (!upload || submitting) return;
+    const name = recipeName.trim();
+    if (!name) {
+      setError("Enter a recipe name before generating the recipe.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
-      const grant = workflow === OFFLINE_WORKFLOW
-        ? null
-        : buildMetaGrant(upload.estimated_frames);
+      const grant = buildMetaGrant(upload.estimated_frames);
       const created = await createUploadAnalysis(
-        upload.upload_id, workflow,
+        upload.upload_id, META_WORKFLOW,
         grant as unknown as Record<string, unknown> | null);
-      setJob({ run_id: created.run_id, workflow: created.workflow });
+      let recipeId: string | null = null;
+      try {
+        const record = await createRecipe({
+          name,
+          language,
+          source_run_id: created.run_id,
+        });
+        recipeId = record.recipe_id;
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? `Analysis started, but the recipe record could not be created (${err.message}).`
+            : "Analysis started, but the recipe record could not be created.",
+        );
+      }
+      setJob({
+        run_id: created.run_id,
+        workflow: created.workflow,
+        recipe_id: recipeId,
+      });
       setProgress(null);
+      if (recipeId && props.onOpenRecipe) {
+        props.onOpenRecipe(recipeId);
+      }
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Could not start analysis.");
@@ -119,18 +147,35 @@ export default function UploadWorkflow(props: {
     if (inputRef.current) inputRef.current.value = "";
   }
 
+  function changeVideo(): void {
+    setFile(null);
+    setUpload(null);
+    setError(null);
+    setJob(null);
+    setProgress(null);
+    setConfirmPaid(false);
+    if (inputRef.current) inputRef.current.value = "";
+    inputRef.current?.click();
+  }
+
+  const canSubmit = upload !== null
+    && !upload.exceeds_frame_cap
+    && recipeName.trim() !== ""
+    && confirmPaid
+    && !submitting;
+
   return (
     <div className="upload-flow">
+      <div>
+        <h2>New recipe</h2>
+        <p className="muted">Turn your cooking video into a recipe.</p>
+      </div>
       <section className="card flow-card">
         <div className="flow-head">
           <span className="step-num">1</span>
           <div>
-            <h2>Upload a preparation video</h2>
-            <p className="muted">
-              MP4 recordings up to about 12 minutes. Uploading only
-              validates and stages the file — it never starts paid
-              inference.
-            </p>
+            <h2>Upload video</h2>
+            <p className="muted">MP4 recordings up to about 12 minutes.</p>
           </div>
         </div>
         <div
@@ -158,10 +203,6 @@ export default function UploadWorkflow(props: {
             }}
           />
           <strong>Drop an MP4 here, or click to choose</strong>
-          <span className="muted small">
-            The original file is stored unchanged with a SHA-256
-            integrity record.
-          </span>
         </div>
         {file && (
           <p className="selection">
@@ -169,6 +210,28 @@ export default function UploadWorkflow(props: {
             ({formatBytes(file.size)})
           </p>
         )}
+        <label className="field">
+          <span>Recipe Name</span>
+          <input
+            type="text"
+            value={recipeName}
+            maxLength={120}
+            placeholder="e.g. XL Cinnamon Rolls"
+            aria-label="Recipe Name"
+            onChange={(event) => setRecipeName(event.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>Recipe Language</span>
+          <select
+            value={language}
+            aria-label="Recipe Language"
+            onChange={(event) => setLanguage(event.target.value)}
+          >
+            <option value="en">English</option>
+            <option value="es">Español</option>
+          </select>
+        </label>
         {uploading !== null && (
           <div className="progress-block">
             <div className="progress-track">
@@ -183,110 +246,68 @@ export default function UploadWorkflow(props: {
           <p className="error" role="alert">{error}</p>
         )}
         {upload && (
-          <dl className="summary-grid">
-            <div><dt>Duration</dt>
-              <dd>{formatDuration(upload.duration_seconds)}</dd></div>
-            <div><dt>Resolution</dt>
-              <dd>{upload.width} × {upload.height}</dd></div>
-            <div><dt>Source frames</dt>
-              <dd>{upload.frame_count} at {upload.fps.toFixed(1)} FPS</dd></div>
-            <div><dt>SHA-256</dt>
-              <dd className="mono">{upload.sha256.slice(0, 16)}…</dd></div>
-            <div><dt>Status</dt>
-              <dd>{upload.deduplicated
-                ? "Ready (identical upload reused)" : "Ready"}</dd></div>
-          </dl>
+          <>
+            <dl className="summary-grid">
+              <div><dt>Duration</dt>
+                <dd>{formatDuration(upload.duration_seconds)}</dd></div>
+              <div><dt>Resolution</dt>
+                <dd>{upload.width} × {upload.height}</dd></div>
+              <div><dt>File size</dt>
+                <dd>{formatBytes(upload.bytes)}</dd></div>
+              <div><dt>Status</dt>
+                <dd>{upload.exceeds_frame_cap
+                  ? "Too long for analysis" : "Ready"}</dd></div>
+            </dl>
+            {upload.exceeds_frame_cap && (
+              <p className="error" role="alert">
+                This video is too long for analysis. Please use a
+                shorter recording.
+              </p>
+            )}
+            <div className="flow-actions">
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={changeVideo}
+              >
+                Change video
+              </button>
+            </div>
+          </>
         )}
       </section>
 
-      {upload && !job && (
+      {upload && !job && !upload.exceeds_frame_cap && (
         <section className="card flow-card">
           <div className="flow-head">
             <span className="step-num">2</span>
             <div>
-              <h2>Configure analysis</h2>
-              <p className="muted">
-                Local preprocessing (frame extraction at 1 FPS) is
-                free. Model inference is billable and only starts
-                after your explicit authorization below.
-              </p>
+              <h2>AI processing</h2>
             </div>
           </div>
-          <dl className="summary-grid">
-            <div><dt>Provider / model</dt>
-              <dd>Meta · {META_MODEL}</dd></div>
-            <div><dt>Sampling</dt><dd>1 FPS</dd></div>
-            <div><dt>Projected frames</dt>
-              <dd>{upload.estimated_frames}</dd></div>
-            <div><dt>Estimated cost</dt>
-              <dd>{upload.estimate
-                ? `≈ $${upload.estimate.estimated_cost_usd.toFixed(2)} (nonbinding)`
-                : "Unavailable — cost is uncertain"}</dd></div>
-            <div><dt>Authorized maximum</dt>
-              <dd>USD {MAX_AUTHORIZED_COST_USD.toFixed(2)} hard cap</dd></div>
-          </dl>
-          {upload.estimate && (
-            <p className="muted small">{upload.estimate.basis}</p>
-          )}
-          {upload.exceeds_frame_cap && (
-            <p className="error" role="alert">
-              This recording projects more than 1,000 sampled
-              frames, the current pipeline limit. Shorten the
-              video before starting analysis.
-            </p>
-          )}
+          <p className="muted">
+            AI will analyze your video and prepare a recipe with
+            ingredients and preparation steps for your review.
+          </p>
+          <label className="confirm-row">
+            <input
+              type="checkbox"
+              checked={confirmPaid}
+              onChange={(event) => setConfirmPaid(event.target.checked)}
+            />
+            <span>
+              I authorize AI processing of this video and understand
+              that it may incur processing costs.
+            </span>
+          </label>
           <div className="flow-actions">
             <button
               type="button"
-              className="btn-ghost"
-              disabled={submitting || upload.exceeds_frame_cap}
-              onClick={() => void startAnalysis(OFFLINE_WORKFLOW)}
-            >
-              Run free offline preview
-            </button>
-            <span className="muted small">
-              Simulated observations, clearly labeled. No Meta
-              request is sent.
-            </span>
-          </div>
-          <div className="auth-box">
-            <h3>Paid Meta analysis</h3>
-            <p className="muted">
-              Model {META_MODEL} · {upload.estimated_frames} frames
-              {" "}·{" "}
-              {upload.estimate
-                ? `estimated ≈ $${upload.estimate.estimated_cost_usd.toFixed(2)} (nonbinding)`
-                : "cost estimate unavailable"}
-            </p>
-            <p className="muted">
-              Authorized maximum:{" "}
-              <strong>
-                USD {MAX_AUTHORIZED_COST_USD.toFixed(2)}
-              </strong>{" "}
-              — strict cap. Sending stops when known spend
-              reaches this limit; the estimate above does not
-              change the cap.
-            </p>
-            <label className="confirm-row">
-              <input
-                type="checkbox"
-                checked={confirmPaid}
-                onChange={(event) => setConfirmPaid(event.target.checked)}
-              />
-              <span>
-                I authorize paid Meta inference for this video
-                with the configuration above, up to a maximum
-                of USD {MAX_AUTHORIZED_COST_USD.toFixed(2)}.
-              </span>
-            </label>
-            <button
-              type="button"
               className="btn-primary"
-              disabled={!confirmPaid || submitting
-                || upload.exceeds_frame_cap}
-              onClick={() => void startAnalysis("video_pipeline_meta")}
+              disabled={!canSubmit}
+              onClick={() => void startRecipeAnalysis()}
             >
-              {submitting ? "Starting…" : "Authorize and start analysis"}
+              {submitting ? "Starting…" : "Generate my recipe"}
             </button>
           </div>
           {error && <p className="error" role="alert">{error}</p>}
@@ -300,17 +321,14 @@ export default function UploadWorkflow(props: {
             <div>
               <h2>Analysis progress</h2>
               <p className="muted">
-                {job.workflow === OFFLINE_WORKFLOW
-                  ? "Offline preview — simulated observations."
-                  : "Meta Muse Spark 1.3 — real inference."}
-                {" "}Run <code>{job.run_id}</code>
+                Run <code>{job.run_id}</code>
               </p>
             </div>
           </div>
           <p className="stage-label">{stageLabel(progress)}</p>
           <div className="progress-track large">
             <div style={{
-              width: `${progress?.percent ?? (terminal ? 100 : 4)}%`,
+              width: `${progress?.percent ?? (terminal ? 100 : 0)}%`,
             }} />
           </div>
           <dl className="summary-grid">
@@ -328,9 +346,7 @@ export default function UploadWorkflow(props: {
           </dl>
           {progress?.status === "queued" && (
             <p className="muted small">
-              Waiting for the local worker. Free jobs are processed
-              by the standard worker; paid Meta jobs only by the
-              secure billable launcher after authorization.
+              Waiting for the local worker to pick up the job.
             </p>
           )}
           {progress?.status === "failed" && (
@@ -340,24 +356,37 @@ export default function UploadWorkflow(props: {
             </p>
           )}
           <div className="flow-actions">
-            {progress?.status === "completed" && (
+            {job.recipe_id && props.onOpenRecipe && (
               <button
                 type="button"
                 className="btn-primary"
+                onClick={() => props.onOpenRecipe?.(job.recipe_id as string)}
+              >
+                Open recipe
+              </button>
+            )}
+            {progress?.status === "completed" && (
+              <button
+                type="button"
+                className="btn-ghost"
                 onClick={() => props.onOpenReview(job.run_id)}
               >
                 Open evidence review
+              </button>
+            )}
+            {props.onViewQueue && (
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => props.onViewQueue?.(job.run_id)}
+              >
+                View in processing queue
               </button>
             )}
             <button type="button" className="btn-ghost" onClick={reset}>
               Analyze another video
             </button>
           </div>
-          <p className="muted small">
-            Refreshing this page does not lose the job: state is
-            stored durably and polling resumes after reload from
-            the Analyses library.
-          </p>
         </section>
       )}
     </div>

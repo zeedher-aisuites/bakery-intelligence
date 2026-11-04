@@ -1,32 +1,7 @@
 /* Bakery Intelligence design system v2. Loaded after styles.css.
    Near-white surfaces, near-black ink, one vivid orange accent. */
 
-:root {
-  --cream: #f5f5f3;
-  --oat: #eceae6;
-  --card: #ffffff;
-  --caramel: #c2410c;
-  --caramel-dark: #9a3408;
-  --terracotta: #ff4b0a;
-  --espresso: #141412;
-  --muted: #70706a;
-  --sage: #17724c;
-  --sage-bg: #e2f1e8;
-  --line: #e5e3de;
-  --alert-bg: #fdeceb;
-  --alert-fg: #9c2b1d;
-  --amber-bg: #fff3d6;
-  --amber-fg: #855b00;
-  --shadow: 0 1px 2px rgba(20, 20, 18, 0.05),
-    0 16px 40px rgba(20, 20, 18, 0.08);
-  --shadow-sm: 0 1px 2px rgba(20, 20, 18, 0.05),
-    0 6px 18px rgba(20, 20, 18, 0.05);
-  --font-sans: "Segoe UI", system-ui, -apple-system, Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  --font-display: "Segoe UI", system-ui, -apple-system, Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
-}
+/* Tokens now live in tokens.css; legacy names are aliased there. */
 
 /* Layout containment: min-content must never widen the document. */
 .workspace > *,
@@ -94,7 +69,7 @@ code {
 
 body {
   font-family: var(--font-sans);
-  background: #f5f5f3;
+  background: var(--canvas);
   color: var(--espresso);
   font-size: 16px;
   letter-spacing: -0.005em;
@@ -112,8 +87,8 @@ h1,
 h2,
 h3,
 .hero-copy h2 {
-  font-family: var(--font-sans);
-  font-weight: 750;
+  font-family: var(--font-display);
+  font-weight: 600;
   letter-spacing: -0.025em;
   color: var(--espresso);
 }
@@ -153,7 +128,7 @@ select {
 
 input:focus,
 textarea:focus {
-  outline: 2px solid rgba(255, 75, 10, 0.4);
+  outline: 2px solid rgba(167, 92, 67, 0.45);
   outline-offset: 1px;
   border-color: var(--terracotta);
 }
@@ -173,8 +148,14 @@ details summary {
   font-weight: 650;
 }
 
-/* Top bar */
+/* Top bar: sticky with a light translucent treatment. */
 .masthead {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(245, 245, 243, 0.88);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   align-items: center;
   padding: 1.1rem 0 1rem;
   border-bottom: 1px solid var(--line);
@@ -183,7 +164,7 @@ details summary {
 
 .masthead h1 {
   font-size: 1.25rem;
-  font-weight: 800;
+  font-weight: 700;
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -194,16 +175,17 @@ details summary {
   content: "B";
   width: 32px;
   height: 32px;
-  border-radius: 9px;
-  background: #141412;
+  border-radius: var(--radius-md);
+  background: var(--accent);
   color: #fff;
   display: grid;
   place-items: center;
-  font-size: 0.95rem;
-  font-weight: 800;
-  box-shadow: inset 0 -3px 0 var(--terracotta);
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
   flex: 0 0 auto;
 }
+
 
 .subtitle {
   font-size: 0.88rem;
@@ -268,7 +250,7 @@ button.primary {
 
 .btn-primary:hover,
 button.primary:not(:disabled):hover {
-  background: #e03d05;
+  background: var(--accent-dark);
 }
 
 .btn-lg {
@@ -291,6 +273,44 @@ button.primary:not(:disabled):hover {
 
 .btn-ghost:hover {
   border-color: #141412;
+}
+
+/* Evidence-state badges: verified, AI-suggested, chef-supplied,
+   unknown. Text labels stay unchanged; only the treatment varies. */
+.badge {
+  display: inline-block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.5;
+  padding: 0.1rem 0.6rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.badge-verified {
+  color: var(--verified);
+  background: var(--verified-bg);
+  border-color: transparent;
+}
+.badge-ai {
+  color: var(--suggest-fg);
+  background: var(--suggest-bg);
+  border-color: transparent;
+}
+.badge-chef {
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+.badge-corrected {
+  color: var(--ink);
+  background: var(--oat);
+  border-color: transparent;
+}
+.badge-unknown {
+  color: var(--unknown-fg);
+  background: transparent;
+  border-color: var(--line);
 }
 
 .pill {
@@ -409,7 +429,7 @@ button.primary:not(:disabled):hover {
   border-radius: 20px;
   overflow: hidden;
   min-height: 420px;
-  background: #111113;
+  background: var(--oat);
   border: none;
   box-shadow: var(--shadow);
 }
@@ -434,7 +454,7 @@ button.primary:not(:disabled):hover {
 .hero-frame {
   position: absolute;
   inset: 0;
-  background: #1a1a1c;
+  background: var(--oat);
 }
 
 .hero-badge {
@@ -1098,7 +1118,7 @@ table.recipe tbody tr:hover,
 }
 
 .summary-card {
-  background: #f5f5f3;
+  background: var(--canvas);
   border: none;
   border-radius: 14px;
   padding: 1rem 1.15rem;
@@ -1465,6 +1485,181 @@ table.recipe tbody tr:hover,
   }
 }
 
+/* Recipe review */
+.recipe-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.45rem 0;
+}
+
+.recipe-frames {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.recipe-thumb {
+  width: 96px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 6px;
+  display: block;
+}
+
+.recipe-row input {
+  flex: 1 1 140px;
+}
+
+/* Observation review */
+.review-split {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) 1fr;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.review-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.review-queue .queue-item {
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-queue .queue-item.selected {
+  border-color: var(--terracotta);
+  box-shadow: 0 0 0 1px var(--terracotta);
+}
+
+.review-detail .viewer-scroll {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  margin: 0.5rem 0;
+}
+
+.review-detail .viewer {
+  width: 100%;
+  height: auto;
+  display: block;
+  transform-origin: top left;
+}
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.6rem 0;
+}
+
+.frame-classify {
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 860px) {
+  .review-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Processing queue */
+.pill-failed {
+  background: var(--alert-bg);
+  color: var(--alert-fg);
+}
+
+.queue-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.queue-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 1rem 0;
+}
+
+.queue-filters button {
+  border: 1px solid #d9d7d2;
+  background: #fff;
+  border-radius: 999px;
+  padding: 0.4rem 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.queue-filters button.active {
+  background: #141412;
+  color: #fff;
+  border-color: #141412;
+}
+
+.queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.queue-item {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+  background: #fff;
+}
+
+.queue-item.highlighted {
+  border-color: var(--terracotta);
+  box-shadow: 0 0 0 1px var(--terracotta);
+}
+
+.queue-item-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.queue-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.5rem 1rem;
+  margin: 0.7rem 0;
+}
+
+.queue-facts dt {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.queue-facts dd {
+  margin: 0;
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.queue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1474,3 +1669,400 @@ table.recipe tbody tr:hover,
   }
 }
 
+/* Chef workflow stages: reuse the tab look, add breathing room. */
+.stage-nav {
+  margin: 0.9rem 0 1rem;
+  flex-wrap: wrap;
+}
+
+details.card.evidence {
+  margin-top: 1.25rem;
+}
+
+details.card.evidence > summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+details.card.evidence > summary .muted {
+  font-weight: 400;
+}
+
+/* Evidence explorer: compact frame inspection for chefs. */
+.ev-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.ev-groups h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.ev-groups ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.ev-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+  flex-wrap: wrap;
+}
+
+.ev-viewer {
+  margin: 0.5rem 0 0;
+}
+
+.ev-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.ev-step {
+  flex: none;
+  font-size: 1.4rem;
+  line-height: 1;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+}
+
+.ev-step:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.ev-figure {
+  margin: 0;
+  max-width: min(100%, 640px);
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+}
+
+/* Stable viewport: one fixed responsive box per viewer. Image swaps
+   never resize it; zoom is a paint-only transform clipped inside. */
+.ev-viewport {
+  width: 100%;
+  height: clamp(240px, 42vh, 420px);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  background: var(--oat, #eceae6);
+  min-width: 0;
+}
+
+.ev-viewport .ev-image {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: none;
+  object-fit: contain;
+  display: block;
+  margin: 0;
+  border-radius: 0.5rem;
+}
+
+.ev-image {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  max-height: 52vh;
+  object-fit: contain;
+  border-radius: 0.5rem;
+}
+
+.ev-viewport .ev-noimage {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--line);
+  border-radius: 0.5rem;
+  box-sizing: border-box;
+}
+
+.ev-noimage {
+  margin: 0 auto;
+  max-width: 100%;
+  padding: 2.5rem 1rem;
+  border: 1px dashed var(--line);
+  border-radius: 0.5rem;
+}
+
+.ev-figure figcaption {
+  margin-top: 0.4rem;
+}
+
+.ev-thumb {
+  flex: none;
+  width: 72px;
+  height: 72px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ev-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ev-thumb.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ev-scrub {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.ev-scrub input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ev-zoom {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.ev-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0.9rem 0 0.25rem;
+}
+
+.ev-strip > div {
+  min-width: 0;
+}
+
+.ev-strip dt {
+  font-size: 0.78rem;
+  color: var(--muted, #6b6259);
+}
+
+.ev-strip dd {
+  margin: 0.1rem 0 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ev-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 16, 12, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 60;
+}
+
+.ev-dialog {
+  background: var(--card, #fff);
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  padding: 1rem 1.25rem 1.25rem;
+  width: min(100%, 430px);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+.ev-dialog h4 {
+  margin: 0 0 0.25rem;
+}
+
+.ev-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0.6rem 0 1.25rem;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .ev-groups {
+    grid-template-columns: 1fr;
+  }
+
+  .ev-thumb {
+    display: none;
+  }
+}
+
+/* Review Findings refinement: reviewer, help, finder cards. */
+.reviewer-control {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.75rem 0 0;
+}
+
+.avatar {
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--oat);
+  color: var(--espresso);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+
+.field.compact {
+  margin: 0;
+  max-width: 16rem;
+}
+
+.help-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 16, 12, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 60;
+}
+
+.modal {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  padding: 1rem 1.25rem 1.25rem;
+  width: min(100%, 430px);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+.modal h4 {
+  margin: 0 0 0.25rem;
+}
+
+.finder-nav {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin: 0.75rem 0;
+}
+
+.finder-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--card);
+}
+
+button.finder-card {
+  cursor: pointer;
+}
+
+.finder-card.current {
+  border-color: var(--caramel);
+}
+
+/* Stable navigator: three slots always occupy the grid, even at the
+   first or last finding, so the viewer below never shifts. */
+.finder-slot {
+  min-width: 0;
+}
+
+.finder-card {
+  min-height: 6.75rem;
+  box-sizing: border-box;
+}
+
+.finder-card.placeholder {
+  visibility: hidden;
+}
+
+.ev-scrub input[type="range"]:disabled {
+  opacity: 0.45;
+}
+
+@media (max-width: 720px) {
+  .finder-nav {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Fit the selected frame without distortion or default scrollbars. */
+.review-detail .viewer-scroll {
+  display: flex;
+  justify-content: center;
+}
+
+.review-detail .viewer {
+  width: auto;
+  max-width: 100%;
+  max-height: 52vh;
+  object-fit: contain;
+}
+
+
+/* Phase 1 responsive foundations. */
+@media (max-width: 480px) {
+  .page,
+  .app {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+}
+
+/* Keep the hero headline to a balanced measure. */
+.hero-copy h2 {
+  max-width: 15ch;
+  text-wrap: balance;
+}

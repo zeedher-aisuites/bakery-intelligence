@@ -167,3 +167,146 @@ def test_worker_billable_stale_job_not_requeued(
     assert final.artifact_ids == []
     assert "Billable workflow" in (final.error or "")
     assert "automatic retry refused" in (final.error or "")
+
+
+def test_worker_entry_loads_local_env(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        worker_module, "_load_local_env",
+        lambda: calls.append("loaded"))
+    assert worker_module.main(
+        ["--once", "--storage-dir", str(tmp_path)]) == 0
+    assert calls == ["loaded"]
+
+
+def test_recover_run_completes_failed_smoke_job(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.api.jobs import utc_now_iso
+    from bakery_intelligence.api.worker import recover_run
+
+    storage, store, service = _stack(tmp_path)
+    storage.store_source("clip01.mp4", io.BytesIO(b"fake-video"))
+    record = service.submit(
+        WORKFLOW_STORAGE_SMOKE, source_object_id="clip01.mp4")
+    now = utc_now_iso()
+    store.claim_next("worker-a", now)
+    assert store.fail(
+        record.run_id, "worker-a", now, "boom") is True
+    status = recover_run(
+        store, storage, record.run_id, "recovery-1",
+        "operator-verified retry")
+    assert status == STATUS_COMPLETED
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_COMPLETED
+    assert final.attempts == 3
+
+
+def test_recover_run_refuses_nonfailed_job(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.api.worker import (
+        RecoveryError,
+        recover_run,
+    )
+
+    storage, store, service = _stack(tmp_path)
+    record = service.submit(WORKFLOW_STORAGE_SMOKE)
+    with pytest.raises(RecoveryError, match="not a failed job"):
+        recover_run(store, storage, record.run_id,
+                    "recovery-1", "note")
+
+
+def test_recover_cli_requires_note(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        worker_module.main(
+            ["--recover", "run_0123456789ab",
+             "--storage-dir", str(tmp_path)])
+    assert exc.value.code == 2
+
+
+def _failed_at_ceiling(tmp_path: Path):
+    """Smoke job failed twice: attempts == 3 (default ceiling)."""
+    from bakery_intelligence.api.jobs import utc_now_iso
+
+    storage, store, service = _stack(tmp_path)
+    storage.store_source("clip01.mp4", io.BytesIO(b"fake-video"))
+    record = service.submit(
+        WORKFLOW_STORAGE_SMOKE, source_object_id="clip01.mp4")
+    now = utc_now_iso()
+    store.claim_next("worker-a", now)
+    assert store.fail(record.run_id, "worker-a", now, "boom")
+    assert store.requeue_billable_failed(
+        record.run_id, now, "first retry") is True
+    store.claim_next("worker-b", now)
+    assert store.fail(
+        record.run_id, "worker-b", now, "boom again")
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.attempts == 3
+    return storage, store, service, record
+
+
+def test_recover_run_refuses_ceiling_job_by_default(
+        tmp_path: Path) -> None:
+    """The default ceiling still refuses a twice-failed job."""
+    from bakery_intelligence.api.worker import (
+        RecoveryError,
+        recover_run,
+    )
+
+    storage, store, _, record = _failed_at_ceiling(tmp_path)
+    with pytest.raises(RecoveryError, match="attempt ceiling"):
+        recover_run(store, storage, record.run_id,
+                    "recovery-2", "second retry")
+
+
+def test_recover_run_accepts_operator_ceiling_override(
+        tmp_path: Path) -> None:
+    """An explicit higher ceiling allows one more recovery."""
+    from bakery_intelligence.api.worker import recover_run
+
+    storage, store, service, record = _failed_at_ceiling(
+        tmp_path)
+    status = recover_run(
+        store, storage, record.run_id, "recovery-2",
+        "second retry", max_attempts=5)
+    assert status == STATUS_COMPLETED
+    final = service.get(record.run_id)
+    assert final is not None
+    assert final.status == STATUS_COMPLETED
+    # Requeue 3 -> 4, claim 4 -> 5: each recovery cycle
+    # consumes two attempts.
+    assert final.attempts == 5
+
+
+def test_recover_cli_plumbs_max_attempts(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake_recover(store, storage, run_id, worker_id,
+                     note, **kwargs):
+        captured.update(kwargs)
+        captured["run_id"] = run_id
+        return STATUS_COMPLETED
+
+    monkeypatch.setattr(
+        worker_module, "recover_run", fake_recover)
+    assert worker_module.main(
+        ["--recover", "run_0123456789ab",
+         "--recover-note", "second retry",
+         "--recover-max-attempts", "5",
+         "--storage-dir", str(tmp_path)]) == 0
+    assert captured["run_id"] == "run_0123456789ab"
+    assert captured["max_attempts"] == 5
+
+
+def test_recover_cli_rejects_nonpositive_ceiling(
+        tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        worker_module.main(
+            ["--recover", "run_0123456789ab",
+             "--recover-note", "note",
+             "--recover-max-attempts", "0",
+             "--storage-dir", str(tmp_path)])
+    assert exc.value.code == 2

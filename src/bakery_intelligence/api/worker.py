@@ -29,15 +29,20 @@ import time
 from pathlib import Path
 from typing import Any
 
+from bakery_intelligence.adversarial.live import _load_local_env
 from bakery_intelligence.api.jobs import (
     SMOKE_RESULT_ARTIFACT,
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_STORAGE_SMOKE,
     WORKFLOW_VIDEO_PIPELINE_META,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
     WORKFLOW_VIDEO_RECONSTRUCT,
     JobRecord,
     utc_now_iso,
+)
+from bakery_intelligence.api.multimodal import (
+    execute_video_pipeline_multimodal,
 )
 from bakery_intelligence.api.offline import (
     execute_offline_reconstruct,
@@ -87,6 +92,7 @@ WORKFLOW_MAX_ATTEMPTS = {
 # billable job fails explicitly and requires deliberate
 # operator action to resume or resubmit.
 BILLABLE_WORKFLOWS: frozenset[str] = frozenset({
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
     WORKFLOW_VIDEO_PIPELINE_META,
 })
 
@@ -128,6 +134,7 @@ _EXECUTORS = {
     WORKFLOW_STORAGE_SMOKE: execute_storage_smoke,
     WORKFLOW_OFFLINE_RECONSTRUCT: execute_offline_reconstruct,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE: execute_video_pipeline_offline,
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL: execute_video_pipeline_multimodal,
     WORKFLOW_VIDEO_PIPELINE_META: execute_video_pipeline_meta,
 }
 
@@ -272,6 +279,59 @@ def serve(store: SqliteJobStore, storage: StorageBackend,
             stop_event.wait(poll_seconds)
 
 
+class RecoveryError(RuntimeError):
+    """Explicit operator recovery was refused or stalled."""
+
+
+def recover_run(store: SqliteJobStore, storage: StorageBackend,
+                run_id: str, worker_id: str,
+                operator_note: str,
+                evidence_dir: Path | None = None,
+                poll_seconds: float = 2.0,
+                max_idle_rounds: int = 30,
+                max_attempts: int = 3) -> str:
+    """Requeue one failed billable job; drive it to terminal state.
+
+    The requeue is conditional (failed status, attempt ceiling)
+    and records the operator note. Persisted stage outputs are
+    reused by the executor, never rebilled. Each recovery
+    consumes two attempts (the conditional requeue plus the
+    worker claim), so a second recovery of the same job needs
+    an explicit higher ceiling. Returns the final status
+    (completed or failed).
+    """
+    from bakery_intelligence.api.jobs import (
+        STATUS_COMPLETED,
+        STATUS_FAILED,
+    )
+
+    if not store.requeue_billable_failed(
+            run_id, utc_now_iso(), operator_note,
+            max_attempts=max_attempts):
+        raise RecoveryError(
+            f"Cannot recover {run_id}: not a failed job below "
+            f"the attempt ceiling ({max_attempts}).")
+    print(f"requeued {run_id} for recovery", flush=True)
+    idle = 0
+    while True:
+        record = store.get(run_id)
+        if record is None:
+            raise RecoveryError(
+                f"Run {run_id} disappeared during recovery.")
+        if record.status in (STATUS_COMPLETED, STATUS_FAILED):
+            return record.status
+        claimed = run_once(
+            store, storage, worker_id,
+            evidence_dir=evidence_dir, allow_billable=True)
+        if claimed is None:
+            idle += 1
+            if idle > max_idle_rounds:
+                raise RecoveryError(
+                    f"Run {run_id} left queued with no worker "
+                    "progress.")
+            time.sleep(poll_seconds)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Worker entry point: ``python -m bakery_intelligence.api.worker``."""
     parser = argparse.ArgumentParser(
@@ -293,12 +353,43 @@ def main(argv: list[str] | None = None) -> int:
                         "jobs by default.")
     parser.add_argument("--once", action="store_true",
                         help="Execute at most one job, then exit.")
+    parser.add_argument("--recover", metavar="RUN_ID", default=None,
+                        help="Requeue one failed billable job with an "
+                        "operator note and drive it to a terminal "
+                        "state. Persisted stage outputs are reused, "
+                        "never rebilled.")
+    parser.add_argument("--recover-note", default="",
+                        help="Required with --recover: why the retry "
+                        "is safe. Recorded on the job.")
+    parser.add_argument("--recover-max-attempts", type=int,
+                        default=3,
+                        help="Attempt ceiling for --recover "
+                        "(default 3; each recovery consumes two "
+                        "attempts: requeue + claim).")
     args = parser.parse_args(argv)
+    _load_local_env()
 
     root = args.storage_dir or (Path.cwd() / "runs_api")
     storage = LocalStorageBackend(root)
     db_path = args.db_path or (storage.base_dir / "jobs.sqlite3")
     store = SqliteJobStore(db_path)
+    if args.recover:
+        if not args.recover_note.strip():
+            parser.error("--recover requires --recover-note.")
+        if args.recover_max_attempts < 1:
+            parser.error("--recover-max-attempts must be >= 1.")
+        try:
+            status = recover_run(
+                store, storage, args.recover,
+                args.worker_id, args.recover_note,
+                evidence_dir=args.evidence_dir,
+                poll_seconds=args.poll_seconds,
+                max_attempts=args.recover_max_attempts)
+        except RecoveryError as exc:
+            print(f"recovery refused: {exc}")
+            return 2
+        print(f"recovery done: {args.recover} -> {status}")
+        return 0 if status == "completed" else 1
     if args.once:
         run_id = run_once(store, storage, args.worker_id,
                           evidence_dir=args.evidence_dir,

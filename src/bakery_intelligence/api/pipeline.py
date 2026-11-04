@@ -40,6 +40,8 @@ from bakery_intelligence.api.authorization import (
     redact_key,
     resolve_api_key,
 )
+from bakery_intelligence.api.limits import pipeline_max_bytes
+from bakery_intelligence.api.storage import LocalStorageBackend
 from bakery_intelligence.api.jobs import (
     WORKFLOW_VIDEO_PIPELINE_META,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
@@ -115,7 +117,7 @@ stays a display string, never a negative quantity."""
 PIPELINE_PASS_ID = "pipeline_firstpass"
 PIPELINE_SAMPLE_FPS = 1.0
 PIPELINE_BATCH_SIZE = 5
-PIPELINE_MAX_VIDEO_BYTES = 16 * 1024 * 1024
+PIPELINE_MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
 PIPELINE_MAX_FRAMES = 1000
 
 # Provider label for the caller-supplied billable path (S4-B).
@@ -337,6 +339,19 @@ def _diff_json(expected: Any, actual: Any, path: str) -> list[str]:
     return []
 
 
+def _input_filename(video_name: str) -> str:
+    """Build the work-dir input name, preserving the extension.
+
+    The stem is sanitized (and may be truncated) separately from
+    the suffix: sanitizing the full filename truncated long
+    upload ids to 48 chars and mangled `.mp4` into `.m`, which
+    intake then rejected as an unsupported container.
+    """
+    suffix = Path(video_name).suffix.lower()
+    stem = sanitize_stem(Path(video_name).stem)
+    return f"upload_{stem}{suffix}"
+
+
 def _staged_names(video_name: str, source_sha256: str
                   ) -> tuple[str, str]:
     """Recompute the deterministic staged video/sidecar names.
@@ -345,7 +360,7 @@ def _staged_names(video_name: str, source_sha256: str
     client name (sanitized), and staging prefixes the content
     hash. Returns (video_filename, sidecar_filename).
     """
-    input_name = f"upload_{sanitize_stem(video_name)}"
+    input_name = _input_filename(video_name)
     suffix = Path(input_name).suffix.lower()
     stem = sanitize_stem(Path(input_name).stem)
     final = f"video_{source_sha256[:16]}_{stem}{suffix}"
@@ -716,14 +731,7 @@ def run_pipeline_offline(
             f"got {max_video_bytes!r}.")
     effective_max = max_video_bytes
     if max_video_bytes == PIPELINE_MAX_VIDEO_BYTES:
-        env_bound = os.environ.get("BAKERY_PIPELINE_MAX_VIDEO_BYTES")
-        if env_bound:
-            try:
-                parsed_bound = int(env_bound)
-            except ValueError:
-                parsed_bound = 0
-            if parsed_bound > 0:
-                effective_max = parsed_bound
+        effective_max = pipeline_max_bytes()
     if len(video_bytes) > effective_max:
         raise VideoError(
             "VIDEO_TOO_LARGE",
@@ -736,6 +744,59 @@ def run_pipeline_offline(
         raise ValueError(
             f"Pipeline source bytes do not match declared "
             f"sha256 for {video_name!r}.")
+    import tempfile
+    handle = tempfile.NamedTemporaryFile(
+        delete=False, suffix=Path(video_name).suffix or ".mp4")
+    try:
+        handle.write(video_bytes)
+        handle.close()
+        return _run_pipeline_core(
+            staged_input=Path(handle.name),
+            video_name=video_name, run_id=run_id,
+            source_object_id=source_object_id,
+            source_sha256=actual_sha, work_dir=work_dir,
+            fake=fake, sample_fps=sample_fps,
+            max_frames=max_frames,
+            billable_client=billable_client,
+            billable_token_budget=billable_token_budget,
+            billable_max_requests=billable_max_requests,
+            billable_cost_ceiling_usd=billable_cost_ceiling_usd,
+            billable_rates_usd_per_m=billable_rates_usd_per_m,
+            billable_strict_cost=billable_strict_cost,
+            billable_api_key=billable_api_key,
+            billable_live=billable_live)
+    finally:
+        Path(handle.name).unlink(missing_ok=True)
+
+
+def _run_pipeline_core(
+    *,
+    staged_input: Path,
+    video_name: str,
+    run_id: str,
+    source_object_id: str,
+    source_sha256: str,
+    work_dir: Path,
+    fake: InferenceClient | None = None,
+    sample_fps: float = PIPELINE_SAMPLE_FPS,
+    max_frames: int = PIPELINE_MAX_FRAMES,
+    billable_client: InferenceClient | None = None,
+    billable_token_budget: int = 1024,
+    billable_max_requests: int | None = None,
+    billable_cost_ceiling_usd: float | None = None,
+    billable_rates_usd_per_m: tuple[float, float] | None = None,
+    billable_strict_cost: bool = False,
+    billable_api_key: str = "",
+    billable_live: bool = False,
+) -> dict[str, bytes]:
+    """Pipeline stages over a staged input file on disk.
+
+    The source is copied in streamed chunks and hashed in a
+    stream; the full video is never held in memory here.
+    Resume semantics are unchanged: a verified state file
+    resumes instead of restarting.
+    """
+    actual_sha = source_sha256
     meta_backed = billable_client is not None
     if meta_backed and fake is not None:
         raise ValueError(
@@ -808,8 +869,10 @@ def run_pipeline_offline(
         _reset_stage_dirs(work_dir)
         input_dir = work_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
-        input_path = input_dir / f"upload_{sanitize_stem(video_name)}"
-        input_path.write_bytes(video_bytes)
+        input_path = input_dir / _input_filename(video_name)
+        with staged_input.open("rb") as src, input_path.open(
+                "wb") as dst:
+            shutil.copyfileobj(src, dst, 1024 * 1024)
         staged = stage_video(input_path, work_dir / "staging")
         extraction = extract_frames(ExtractionConfig(
             video_path=staged.video_path,
@@ -1054,6 +1117,117 @@ def run_pipeline_offline(
     return artifacts
 
 
+def _hash_file(path: Path) -> str:
+    """Streamed SHA-256 of a file (never fully in memory)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def run_pipeline_from_path(
+    *,
+    video_path: Path,
+    video_name: str,
+    run_id: str,
+    source_object_id: str,
+    work_dir: Path,
+    fake: InferenceClient | None = None,
+    sample_fps: float = PIPELINE_SAMPLE_FPS,
+    max_frames: int = PIPELINE_MAX_FRAMES,
+    billable_client: InferenceClient | None = None,
+    billable_token_budget: int = 1024,
+    billable_max_requests: int | None = None,
+    billable_cost_ceiling_usd: float | None = None,
+    billable_rates_usd_per_m: tuple[float, float] | None = None,
+    billable_strict_cost: bool = False,
+    billable_api_key: str = "",
+    billable_live: bool = False,
+    max_video_bytes: int = PIPELINE_MAX_VIDEO_BYTES,
+) -> dict[str, bytes]:
+    """Run the pipeline over a video file already on disk.
+
+    Size is checked from file metadata and the digest is
+    streamed, so large sources never load fully into memory.
+    """
+    if (isinstance(max_video_bytes, bool)
+            or not isinstance(max_video_bytes, int)
+            or max_video_bytes <= 0):
+        raise ValueError(
+            "max_video_bytes must be a positive int, "
+            f"got {max_video_bytes!r}.")
+    effective_max = max_video_bytes
+    if max_video_bytes == PIPELINE_MAX_VIDEO_BYTES:
+        effective_max = pipeline_max_bytes()
+    size = video_path.stat().st_size
+    if size > effective_max:
+        raise VideoError(
+            "VIDEO_TOO_LARGE",
+            f"Pipeline video is {size} bytes; limit is "
+            f"{effective_max}.",
+            video_name,
+        )
+    return _run_pipeline_core(
+        staged_input=video_path, video_name=video_name,
+        run_id=run_id, source_object_id=source_object_id,
+        source_sha256=_hash_file(video_path), work_dir=work_dir,
+        fake=fake, sample_fps=sample_fps, max_frames=max_frames,
+        billable_client=billable_client,
+        billable_token_budget=billable_token_budget,
+        billable_max_requests=billable_max_requests,
+        billable_cost_ceiling_usd=billable_cost_ceiling_usd,
+        billable_rates_usd_per_m=billable_rates_usd_per_m,
+        billable_strict_cost=billable_strict_cost,
+        billable_api_key=billable_api_key,
+        billable_live=billable_live)
+
+
+def _run_source_pipeline(storage: StorageBackend,
+                         record: JobRecord,
+                         **kwargs: Any) -> dict[str, bytes]:
+    """Execute the pipeline over a stored source, streamed."""
+    if record.source_object_id is None:
+        raise ValueError("Pipeline requires a source.")
+    if not storage.source_exists(record.source_object_id):
+        raise ValueError(
+            f"Unknown source: {record.source_object_id!r}.")
+    work_dir = storage.run_work_dir(record.run_id)
+    if isinstance(storage, LocalStorageBackend):
+        local = (storage.base_dir / "sources"
+                 / record.source_object_id)
+        if local.is_file():
+            return run_pipeline_from_path(
+                video_path=local,
+                video_name=record.source_object_id,
+                run_id=record.run_id,
+                source_object_id=record.source_object_id,
+                work_dir=work_dir, **kwargs)
+    import tempfile
+    handle = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=Path(record.source_object_id).suffix or ".mp4")
+    try:
+        with storage.open_source(record.source_object_id) as src:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+        handle.close()
+        return run_pipeline_from_path(
+            video_path=Path(handle.name),
+            video_name=record.source_object_id,
+            run_id=record.run_id,
+            source_object_id=record.source_object_id,
+            work_dir=work_dir, **kwargs)
+    finally:
+        Path(handle.name).unlink(missing_ok=True)
+
+
 def execute_video_pipeline_offline(
         storage: StorageBackend,
         record: JobRecord) -> dict[str, bytes]:
@@ -1065,21 +1239,7 @@ def execute_video_pipeline_offline(
     PipelineResumeError, an explicit job failure that is never
     silently retried.
     """
-    if record.source_object_id is None:
-        raise ValueError("video_pipeline_offline requires a source.")
-    if not storage.source_exists(record.source_object_id):
-        raise ValueError(
-            f"Unknown source: {record.source_object_id!r}.")
-    with storage.open_source(record.source_object_id) as handle:
-        raw = handle.read()
-    return run_pipeline_offline(
-        video_bytes=raw,
-        video_name=record.source_object_id,
-        run_id=record.run_id,
-        source_object_id=record.source_object_id,
-        source_sha256=hashlib.sha256(raw).hexdigest(),
-        work_dir=storage.run_work_dir(record.run_id),
-    )
+    return _run_source_pipeline(storage, record)
 
 
 def _build_meta_client(*, model: str, timeout_seconds: float,
@@ -1131,19 +1291,12 @@ def execute_video_pipeline_meta(
     if not storage.source_exists(record.source_object_id):
         raise ValueError(
             f"Unknown source: {record.source_object_id!r}.")
-    with storage.open_source(record.source_object_id) as handle:
-        raw = handle.read()
     client = _build_meta_client(
         model=grant.model, timeout_seconds=grant.timeout_seconds,
         store=grant.store)
     try:
-        return run_pipeline_offline(
-            video_bytes=raw,
-            video_name=record.source_object_id,
-            run_id=record.run_id,
-            source_object_id=record.source_object_id,
-            source_sha256=hashlib.sha256(raw).hexdigest(),
-            work_dir=storage.run_work_dir(record.run_id),
+        return _run_source_pipeline(
+            storage, record,
             billable_client=client,
             billable_token_budget=grant.token_budget,
             billable_max_requests=grant.max_requests,
