@@ -48,7 +48,7 @@ _REQUIRED_KEYS = frozenset({
 })
 _OPTIONAL_KEYS = frozenset({
     "timeout_seconds", "store", "cost_ceiling_usd",
-    "rates_usd_per_m", "strict_cost",
+    "rates_usd_per_m", "strict_cost", "firstpass_engine",
 })
 _KNOWN_KEYS = _REQUIRED_KEYS | _OPTIONAL_KEYS
 
@@ -75,6 +75,7 @@ class Grant:
     cost_ceiling_usd: float | None = None
     rates_usd_per_m: tuple[float, float] | None = None
     strict_cost: bool = False
+    firstpass_engine: str | None = None
 
 
 def confirmation_sentence(workflow: str, model: str,
@@ -186,6 +187,14 @@ def parse_grant(payload: Any) -> Grant:
     if not isinstance(strict, bool):
         raise GrantError(
             f"Grant strict_cost must be a bool, got {strict!r}.")
+    engine = payload.get("firstpass_engine")
+    if engine is not None:
+        if (not isinstance(engine, str) or not engine.strip()
+                or len(engine) > 64):
+            raise GrantError(
+                "Grant firstpass_engine must be a non-empty "
+                f"engine id, got {engine!r}.")
+        engine = engine.strip()
     operator = payload["operator"]
     if not isinstance(operator, str) or not operator:
         raise GrantError(
@@ -217,6 +226,7 @@ def parse_grant(payload: Any) -> Grant:
         cost_ceiling_usd=(
             None if ceiling is None else float(ceiling)),
         rates_usd_per_m=rates_pair, strict_cost=strict,
+        firstpass_engine=engine,
     )
 
 
@@ -241,6 +251,12 @@ def grant_to_json(grant: Grant) -> str:
             if grant.rates_usd_per_m is not None else None),
         "strict_cost": grant.strict_cost,
     }
+    # The confirmation sentence intentionally excludes the
+    # engine: stored grants predate the key and must keep
+    # parsing byte-identically. Engine membership and
+    # grant/env conflicts are enforced at execution time.
+    if grant.firstpass_engine is not None:
+        payload["firstpass_engine"] = grant.firstpass_engine
     return json.dumps(payload, sort_keys=True)
 
 

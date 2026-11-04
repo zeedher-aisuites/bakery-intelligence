@@ -11,6 +11,26 @@ export const TOKEN_BUDGET = 4096;
 export const ASR_CHUNK_SECONDS = 330;
 export const NON_FRAME_BASE_CALLS = 3;
 
+export function firstpassRequests(
+  frames: number, engine: string,
+): number {
+  if (!Number.isFinite(frames) || frames <= 0) return 0;
+  if (engine === FIRSTPASS_ENGINE_SCALE
+    || engine === FIRSTPASS_ENGINE_BATCH) {
+    return Math.ceil(frames / 10);
+  }
+  if (engine === FIRSTPASS_ENGINE_FOCUSED) {
+    return Math.ceil(frames / 50);
+  }
+  return frames;
+}
+
+export function scaleWorstCaseUsd(batches: number): number {
+  return batches * (
+    (SCALE_INPUT_TOKEN_BOUND / 1e6) * RATES_USD_PER_M[0]
+    + (SCALE_OUTPUT_TOKEN_BUDGET / 1e6) * RATES_USD_PER_M[1]);
+}
+
 export function extraMetaRequests(frames: number): number {
   const chunks = Math.max(
     1, Math.ceil(Math.max(1, Math.floor(frames)) / ASR_CHUNK_SECONDS));
@@ -18,6 +38,14 @@ export function extraMetaRequests(frames: number): number {
 }
 export const MAX_AUTHORIZED_COST_USD = 20;
 export const RATES_USD_PER_M: [number, number] = [1.25, 4.25];
+export const FIRSTPASS_ENGINE_SINGLE = "single_frame";
+export const FIRSTPASS_ENGINE_SCALE = "parallel_scale";
+export const FIRSTPASS_ENGINE_BATCH = "contextual_batch";
+export const FIRSTPASS_ENGINE_FOCUSED = "focused_batch";
+// Worst-case input bound per scale batch (10 anchored
+// images + prompt), matching the backend reservation.
+export const SCALE_INPUT_TOKEN_BOUND = 9000;
+export const SCALE_OUTPUT_TOKEN_BUDGET = 8192;
 
 export function estimateFrames(durationSeconds: number): number {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return 0;
@@ -47,6 +75,7 @@ export interface MetaGrant {
   cost_ceiling_usd: number | null;
   rates_usd_per_m: [number, number];
   strict_cost: boolean;
+  firstpass_engine: string;
 }
 
 export function confirmationSentence(
@@ -65,9 +94,11 @@ export function buildMetaGrant(
   frames: number,
   operator = "web-user",
   now: Date = new Date(),
+  engine: string = FIRSTPASS_ENGINE_SINGLE,
 ): MetaGrant {
   const safeFrames = Math.max(1, Math.floor(frames));
-  const maxRequests = safeFrames + extraMetaRequests(safeFrames);
+  const maxRequests = firstpassRequests(safeFrames, engine)
+    + extraMetaRequests(safeFrames);
   return {
     grant_format: "bakery-billable-grant/1",
     workflow: META_WORKFLOW,
@@ -85,5 +116,6 @@ export function buildMetaGrant(
     cost_ceiling_usd: MAX_AUTHORIZED_COST_USD,
     rates_usd_per_m: RATES_USD_PER_M,
     strict_cost: true,
+    firstpass_engine: engine,
   };
 }

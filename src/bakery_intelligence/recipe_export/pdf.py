@@ -15,8 +15,10 @@ from bakery_intelligence.recipe_export.labels import (
     TEXT,
     adjustment_note,
     clip_label,
+    ingredient_role,
     lang_of,
     row_source,
+    split_display_name,
 )
 
 INK = (26, 24, 21)
@@ -87,6 +89,8 @@ class RecipePDF(FPDF):
                   align="C")
 
     def section_title(self, text: str) -> None:
+        if self.get_y() + 30 > self.page_break_trigger:
+            self.add_page()
         self.set_font("Helvetica", "B", 13)
         self.set_text_color(*TERRA)
         self.cell(0, 9, sanitize(text).upper(), new_x="LMARGIN",
@@ -167,14 +171,29 @@ def render_ingredients(pdf: RecipePDF,
         striped = position % 2 == 1
         qty = fmt_amount(row.get("quantity"), language)
         detail = adjustment_note(row, language)
-        cells = [sanitize(row.get("name")), qty,
+        primary, qualifier = split_display_name(
+            row.get("name"))
+        sub_notes = []
+        if qualifier:
+            sub_notes.append((sanitize(qualifier), "I", 8.5,
+                              _DETAIL_LINE_H))
+        if ingredient_role(row) == "intermediate":
+            sub_notes.append((sanitize(
+                labels["intermediate_note"]), "I", 8,
+                _DETAIL_LINE_H))
+        cells = [sanitize(primary), qty,
                  sanitize(row.get("unit")) or "-",
                  sanitize(row_source(row, language))]
         styles = ["B", "", "", ""]
         counts = [len(wrapped_lines(pdf, width, text, style))
                   for width, text, style in zip(
                       widths, cells, styles)]
-        main_h = max(counts) * _ROW_LINE_H
+        name_h = counts[0] * _ROW_LINE_H
+        for text, style, size, line_h in sub_notes:
+            name_h += len(wrapped_lines(
+                pdf, widths[0], text, style, size)) * line_h
+        main_h = max([name_h] + [
+            count * _ROW_LINE_H for count in counts[1:]])
         detail_h = 0.0
         if detail:
             detail_h = len(wrapped_lines(
@@ -197,6 +216,16 @@ def render_ingredients(pdf: RecipePDF,
             pdf.multi_cell(width, _ROW_LINE_H, text,
                            border=0)
             x_start += width
+        sub_y = y_start + counts[0] * _ROW_LINE_H
+        for text, style, size, line_h in sub_notes:
+            pdf.set_xy(pdf.l_margin, sub_y)
+            pdf.set_font("Helvetica", style, size)
+            pdf.set_text_color(*MUTED)
+            pdf.multi_cell(widths[0], line_h, text,
+                           border=0)
+            sub_y += len(wrapped_lines(
+                pdf, widths[0], text, style, size)) * line_h
+        pdf.set_text_color(*INK)
         if detail:
             pdf.set_xy(pdf.l_margin + widths[0],
                        y_start + main_h)
@@ -209,6 +238,25 @@ def render_ingredients(pdf: RecipePDF,
     pdf.ln(2)
 
 
+def _step_height(pdf: RecipePDF,
+                 item: dict[str, Any]) -> float:
+    """Measured block height for one method step."""
+    span = pdf.w - pdf.l_margin - pdf.r_margin - 12
+    total = 8.0
+    total += len(wrapped_lines(
+        pdf, span, sanitize(item.get("instruction")),
+        "", 10)) * 5.2
+    if item.get("chef_edited"):
+        total += len(wrapped_lines(
+            pdf, span, "Edited", "I", 8)) * 4.4
+    guidance = item.get("ai_guidance") or {}
+    if guidance.get("text"):
+        total += len(wrapped_lines(
+            pdf, span, sanitize(guidance["text"]),
+            "I", 8)) * 4.4
+    return total + 2.0
+
+
 def render_method(pdf: RecipePDF,
                   method: list[dict[str, Any]],
                   language: str) -> None:
@@ -216,13 +264,21 @@ def render_method(pdf: RecipePDF,
     labels = TEXT[language]
     current_clip: str | None = None
     for item in method:
-        clip = item.get("clip_id") or "unknown clip"
+        clip = item.get("clip_id") or ""
         if clip != current_clip:
             current_clip = clip
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.set_text_color(*TERRA)
-            pdf.cell(0, 7, sanitize(clip_label(clip, language)),
-                     new_x="LMARGIN", new_y="NEXT")
+            heading = sanitize(clip_label(clip, language))
+            if heading:
+                if pdf.get_y() + 7 + 20 > \
+                        pdf.page_break_trigger:
+                    pdf.add_page()
+                pdf.set_font("Helvetica", "B", 10)
+                pdf.set_text_color(*TERRA)
+                pdf.cell(0, 7, heading,
+                         new_x="LMARGIN", new_y="NEXT")
+        if pdf.get_y() + _step_height(pdf, item) > \
+                pdf.page_break_trigger:
+            pdf.add_page()
         pdf.set_font("Helvetica", "B", 22)
         pdf.set_text_color(*LINE)
         number = str(item.get("number"))

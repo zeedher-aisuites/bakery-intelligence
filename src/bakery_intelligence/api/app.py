@@ -1107,6 +1107,8 @@ def build_app(storage: StorageBackend | None = None,
         stage = record.status
         frames_total: int | None = None
         frames_processed: int | None = None
+        pipeline_stage: str | None = None
+        recipe_ready = False
         updated = record.updated_at
         if isinstance(backend, LocalStorageBackend):
             work = (backend.base_dir / "runs" / run_id / "work")
@@ -1137,12 +1139,37 @@ def build_app(storage: StorageBackend | None = None,
                         continue
                     if isinstance(payload, list):
                         frames_processed += len(payload)
+            cost_path = (work / "multimodal"
+                         / "cost_report.json")
+            if cost_path.is_file():
+                try:
+                    report = json.loads(
+                        cost_path.read_text(
+                            encoding="utf-8"))
+                except (OSError, ValueError):
+                    report = None
+                if isinstance(report, dict):
+                    entries = report.get("calls")
+                    if (isinstance(entries, list)
+                            and entries):
+                        last = entries[-1]
+                        if isinstance(last, dict):
+                            pipeline_stage = (
+                                f"{last.get('stage', '?')} "
+                                f"({last.get('status', '?')})")
+            recipe_ready = (work.parent / "artifacts"
+                              / "multimodal_fusion_recipe.json"
+                              ).is_file()
         percent = None
         if frames_total and frames_processed is not None:
             percent = round(
                 100.0 * frames_processed / frames_total, 1)
         if record.status == STATUS_COMPLETED:
             percent = 100.0
+        frames_complete = (frames_total is not None
+                           and frames_processed is not None
+                           and frames_total > 0
+                           and frames_processed >= frames_total)
         return {
             "run_id": record.run_id,
             "workflow": record.workflow,
@@ -1151,6 +1178,9 @@ def build_app(storage: StorageBackend | None = None,
             "frames_total": frames_total,
             "frames_processed": frames_processed,
             "percent": percent,
+            "frames_complete": frames_complete,
+            "pipeline_stage": pipeline_stage,
+            "recipe_ready": recipe_ready,
             "error": record.error,
             "updated_at": updated,
         }
@@ -1232,7 +1262,31 @@ def build_app(storage: StorageBackend | None = None,
 
     @app.get("/api/recipes")
     def list_recipe_cards() -> dict[str, Any]:
-        return {"recipes": list_recipes(_review_root())}
+        cards = list_recipes(_review_root())
+        for card in cards:
+            if card.get("has_snapshot"):
+                continue
+            if card.get("status") != "processing":
+                continue
+            run_id = card.get("source_run_id")
+            if not run_id:
+                card["status"] = "failed"
+                card["build_error"] = (
+                    "This recipe has no linked video analysis.")
+                continue
+            try:
+                job = service.get(run_id)
+            except Exception:
+                job = None
+            if job is None:
+                continue
+            if job.status == STATUS_FAILED:
+                card["status"] = "failed"
+                card["build_error"] = (
+                    job.error or "Video analysis failed.")[:300]
+            elif job.status == STATUS_COMPLETED:
+                card["status"] = "awaiting_build"
+        return {"recipes": cards}
 
     @app.post("/api/recipes", status_code=201)
     def create_recipe(

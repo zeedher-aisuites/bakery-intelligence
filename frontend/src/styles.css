@@ -919,6 +919,13 @@ button.btn-primary:disabled,
   gap: 1rem;
 }
 
+.family-head .btn-ghost {
+  flex-shrink: 0;
+  align-self: flex-start;
+  white-space: nowrap;
+  padding: 0.45rem 0.9rem;
+}
+
 .family-head > div {
   display: flex;
   flex-direction: column;

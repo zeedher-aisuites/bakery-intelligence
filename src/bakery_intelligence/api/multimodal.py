@@ -88,10 +88,20 @@ GLOBAL_MAX_TOKENS = 16384
 # unexposed reasoning (finish=length, 4096/4096 tokens, empty
 # content). 8192 leaves headroom for reasoning + JSON.
 SEGMENT_MAX_TOKENS = 8192
-SPEECH_MAX_TOKENS = 8192
+# Verified live: an 8192 ceiling truncated speech claims on the
+# 645-frame production run (output_tokens hit 8192 with 4133
+# reasoning tokens; JSON cut mid-claim). The Meta Responses
+# endpoint accepted 65536 on the same client contract during
+# focused-batch validation (3 live requests, no rejection).
+# The ceiling bounds worst-case spend, not generated length.
+SPEECH_MAX_TOKENS = 65536
 # Verified live: 4096 truncated the validation JSON on a
-# 10 s clip (reasoning + content exceed the budget).
-VALIDATION_MAX_TOKENS = 8192
+# 10 s clip (reasoning + content exceed the budget), and
+# 8192 truncated speech claims on the 645-frame production
+# run. Validation consumes strictly more evidence than
+# speech claims, so it shares the Meta-verified 65536
+# ceiling instead of repeating the same failure.
+VALIDATION_MAX_TOKENS = 65536
 FUSION_MAX_TOKENS = 16384
 # Chef-requested revision: one bounded call. Verified live:
 # 8192 was exhausted by unexposed reasoning (finish=length,
@@ -500,9 +510,30 @@ def _spark_tokens(usage: dict[str, Any]) -> tuple[int, int]:
             num(usage.get("output_tokens")))
 
 
+def _global_context_for_firstpass(
+        global_record: dict[str, Any] | None) -> str | None:
+    """Bounded global summary for contextual group 0.
+
+    Returns None when no usable global result exists; the
+    grouped runner then starts with no inherited context.
+    """
+    if not isinstance(global_record, dict):
+        return None
+    result = global_record.get("result")
+    if result is None:
+        return None
+    try:
+        text = json.dumps(
+            result, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        text = str(result)
+    return ("Global video analysis summary: " + text)[:4000]
+
+
 def frame_stage_calls(
         firstpass: dict[str, Any],
-        resumed: bool = False) -> list[StageCall]:
+        resumed: bool = False,
+        elapsed_seconds: float = 0.0) -> list[StageCall]:
     """Aggregate Path A usage into one cost-report call.
 
     The first-pass report already carries token totals and a
@@ -510,7 +541,10 @@ def frame_stage_calls(
     multimodal cost report honest instead of hiding the
     dominant frame spend behind a pointer. A resumed run
     records 0.0 new spend: the pipeline core verified prior
-    outputs without billing.
+    outputs without billing. ``elapsed_seconds`` carries the
+    measured Path A wall clock (staging through first-pass
+    report); it must not be confused with summed API
+    latencies.
     """
     def num(value: Any) -> int:
         return value if isinstance(value, int) and value >= 0 else 0
@@ -532,7 +566,7 @@ def frame_stage_calls(
     return [StageCall(
         stage="frames_firstpass", provider="meta",
         model=SPARK_MODEL, request_id=None, status=status,
-        elapsed_seconds=0.0,
+        elapsed_seconds=float(elapsed_seconds),
         usage={
             "input_tokens": num(
                 firstpass.get("input_tokens")),
@@ -542,6 +576,10 @@ def frame_stage_calls(
                 firstpass.get("requests_sent")),
             "batches_completed": num(
                 firstpass.get("batches_completed")),
+            "groups_completed": num(
+                firstpass.get("groups_completed")),
+            "groups_valid": num(
+                firstpass.get("groups_valid")),
         },
         estimate_usd=new_estimate,
         error=error)]
@@ -1310,10 +1348,17 @@ def build_merged_evidence(
                 "provider": claims.get("provider"),
                 "request_id": claims.get("request_id"),
             })
+    readings = firstpass_bundle.get("readings") or []
+    usable = firstpass_bundle.get("readings_usable_total")
+    if not isinstance(usable, int) or usable < len(readings):
+        usable = len(readings)
     return {
         "video": firstpass_bundle.get("video") or {},
-        "readings_total": len(
-            firstpass_bundle.get("readings") or []),
+        "readings_total": len(readings),
+        "readings_usable_total": usable,
+        "readings_truncated": bool(
+            firstpass_bundle.get("readings_truncated",
+                                 usable > len(readings))),
         "weighing": firstpass_bundle.get("weighing") or {},
         "unresolved": firstpass_bundle.get("unresolved") or [],
         "global_result": global_result,
@@ -1576,8 +1621,12 @@ def execute_video_pipeline_multimodal(
         clients: dict[str, Any] | None = None) -> dict[str, bytes]:
     """Run every mandatory multimodal stage (no silent skips)."""
     from bakery_intelligence.api.pipeline import (
+        FIRSTPASS_ENGINE_BATCH,
         PIPELINE_STATE_FILENAME,
         STAGE_FIRSTPASS_DONE,
+        firstpass_engine_from_env,
+    resolve_firstpass_engine,
+        frame_timeout_seconds,
         run_pipeline_from_path,
     )
     from bakery_intelligence.inference.meta_spark import (
@@ -1709,10 +1758,18 @@ def execute_video_pipeline_multimodal(
     except Exception as exc:
         raise fail("frames", exc)
     try:
+        frame_engine = resolve_firstpass_engine(
+        grant.firstpass_engine)
         frame_client = clients.get("frames") or MetaSparkClient(
             model=grant.model,
-            timeout_seconds=grant.timeout_seconds,
+            timeout_seconds=frame_timeout_seconds(
+                frame_engine, grant.timeout_seconds),
             store=grant.store)
+        frame_context = (
+            _global_context_for_firstpass(global_record)
+            if frame_engine == FIRSTPASS_ENGINE_BATCH
+            else None)
+        frames_started = time.perf_counter()
         frame_artifacts = run_pipeline_from_path(
             video_path=source_path,
             video_name=record.source_object_id,
@@ -1727,14 +1784,18 @@ def execute_video_pipeline_multimodal(
             billable_strict_cost=grant.strict_cost,
             billable_api_key=meta_key,
             billable_live=True,
-            max_frames=grant.max_frames)
+            max_frames=grant.max_frames,
+            firstpass_engine=frame_engine,
+            firstpass_global_context=frame_context)
         firstpass = json.loads(frame_artifacts[
             "firstpass_report.json"].decode("utf-8"))
         frames_used = int(firstpass.get("requests_sent") or 0)
+        frames_elapsed = time.perf_counter() - frames_started
     except Exception as exc:
         raise fail("frames", exc)
     calls.extend(frame_stage_calls(
-        firstpass, resumed=frames_resumed))
+        firstpass, resumed=frames_resumed,
+        elapsed_seconds=frames_elapsed))
     meta_used += frames_used
     remaining = reserve - 1  # global already ran
     if meta_used + remaining > grant.max_requests:

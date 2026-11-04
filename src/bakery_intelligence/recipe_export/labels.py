@@ -14,6 +14,12 @@ VISUAL_HINTS = ("Displayed", "display", "observed", "Observed",
                 "Counted", "counted", "readable", "legible")
 AUDIO_HINTS = ("spoken", "Spoken", "mentioned", "Mentioned",
                "narration", "speaker", "audio", "mencion")
+# Intermediate preparations are detected only by explicit
+# recorded wording ("from previous step", "added back"):
+# the model names a product of earlier recipe steps, not a
+# fresh raw material. Anything else stays a raw row.
+INTERMEDIATE_HINTS = ("from previous step", "added back",
+                      "from the previous step")
 
 TEXT: dict[str, dict[str, str]] = {
     "en": {
@@ -38,6 +44,8 @@ TEXT: dict[str, dict[str, str]] = {
         "ai_guidance": "AI suggestion",
         "subtitle": ("AI-generated bakery recipe draft. Review "
                      "and approve before use."),
+        "intermediate_note": ("Prepared during this recipe; not "
+                              "an additional raw material."),
     },
     "es": {
         "ingredients": "Ingredientes",
@@ -61,6 +69,8 @@ TEXT: dict[str, dict[str, str]] = {
         "ai_guidance": "Sugerencia de IA",
         "subtitle": ("Borrador de receta generado por IA. Revisa y "
                      "aprueba antes de usar."),
+        "intermediate_note": ("Preparado durante esta receta; no es "
+                              "materia prima adicional."),
     },
 }
 
@@ -71,6 +81,18 @@ def lang_of(recipe: dict[str, Any]) -> str:
     return language if language in TEXT else "en"
 
 
+def _hint_kinds(row: dict[str, Any]) -> tuple[bool, bool]:
+    """Visual/audio evidence hints from recorded fields."""
+    basis = str(row.get("quantity_basis") or "").lower()
+    kinds = " ".join(
+        str(e.get("kind") or "")
+        for e in (row.get("evidence") or [])).lower()
+    visual = any(h.lower() in basis for h in VISUAL_HINTS) or \
+        "scale_display" in kinds
+    audio = any(h.lower() in basis for h in AUDIO_HINTS)
+    return visual, audio
+
+
 def row_source(row: dict[str, Any], language: str) -> str:
     """One short provenance label for an ingredient row."""
     labels = TEXT[language]
@@ -78,19 +100,20 @@ def row_source(row: dict[str, Any], language: str) -> str:
         return labels["chef_edited"]
     status = row.get("quantity_status")
     if status == "ai_estimated":
+        visual, audio = _hint_kinds(row)
+        if visual and audio:
+            return labels["seen_and_heard"]
+        if audio:
+            return labels["heard_audio"]
+        if visual:
+            return labels["seen_video"]
         return labels["ai_suggested"]
     if status == "seen_video":
         return labels["seen_video"]
     if status == "mentioned_audio":
         return labels["heard_audio"]
     if status in ("chef_supplied", "observed_count"):
-        basis = str(row.get("quantity_basis") or "")
-        kinds = " ".join(
-            str(e.get("kind") or "")
-            for e in (row.get("evidence") or []))
-        visual = any(h in basis for h in VISUAL_HINTS) or \
-            "scale_display" in kinds
-        audio = any(h in basis for h in AUDIO_HINTS)
+        visual, audio = _hint_kinds(row)
         if visual and audio:
             return labels["seen_and_heard"]
         if audio:
@@ -119,11 +142,64 @@ def adjustment_note(row: dict[str, Any], language: str) -> str | None:
 
 
 def clip_label(clip_id: Any, language: str) -> str:
-    """Recording part without technical identifiers."""
+    """Recording part without technical identifiers.
+
+    Internal single-clip ids ("uploaded_video") and empty
+    values render as "": callers skip the group header
+    instead of printing a technical label.
+    """
     labels = TEXT[language]
-    text = str(clip_id or "")
+    text = str(clip_id or "").strip()
     if text.endswith("preparation"):
         return labels["clip1"]
     if text.endswith("mixing"):
         return labels["clip2"]
-    return text or labels["unknown"]
+    if text in ("", "uploaded_video", "unknown clip",
+                "unknown"):
+        return ""
+    return text
+
+
+def split_display_name(name: Any) -> tuple[str, str | None]:
+    """Primary name plus parenthetical qualifier, if present.
+
+    Descriptive fusion names carry the uncertainty note in
+    trailing parentheses ("white powder (audio describes
+    as flour)"): the split is purely presentational and
+    never drops text.
+    """
+    text = str(name or "").strip()
+    if not text.endswith(")"):
+        return text, None
+    depth = 0
+    outer: int | None = None
+    for pos in range(len(text) - 1, -1, -1):
+        char = text[pos]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                outer = pos
+    if outer is None:
+        return text, None
+    primary = text[:outer].strip()
+    qualifier = text[outer + 1:-1].strip()
+    if primary and qualifier:
+        return primary, qualifier
+    return text, None
+
+
+def ingredient_role(row: dict[str, Any]) -> str:
+    """Raw material vs intermediate preparation (display only).
+
+    Returns "intermediate" only when the recorded name or
+    basis explicitly describes a product of earlier steps;
+    otherwise "raw". Stored quantities are untouched: an
+    intermediate with a null quantity cannot double-count.
+    """
+    text = (str(row.get("name") or "") + " "
+            + str(row.get("quantity_basis") or "")).lower()
+    if any(h in text for h in INTERMEDIATE_HINTS):
+        return "intermediate"
+    return "raw"

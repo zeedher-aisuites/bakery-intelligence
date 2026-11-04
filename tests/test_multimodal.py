@@ -1489,3 +1489,348 @@ def test_fusion_stage_accepts_segment_grounded_quantity(
     assert record["result"]["ingredients"][0][
         "quantity"] == 238.0
     assert call.status == "ok"
+
+
+def test_executor_frames_client_timeout_by_engine(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frame client timeout follows the engine, not the grant."""
+    import bakery_intelligence.api.pipeline as pipeline_mod
+
+    storage, base_record = _smoke_executor(tmp_path, monkeypatch)
+    payload = json.loads(base_record.grant_json)
+    payload["timeout_seconds"] = 45
+    record = JobRecord(
+        run_id=base_record.run_id,
+        workflow=base_record.workflow,
+        source_object_id=base_record.source_object_id,
+        grant_json=json.dumps(payload))
+    captured: dict[str, Any] = {}
+
+    def fake_run(**kwargs: Any) -> dict[str, bytes]:
+        captured.update(kwargs)
+        return {"firstpass_report.json":
+                b'{"requests_sent": 8}'}
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_pipeline_from_path", fake_run)
+    monkeypatch.delenv("FIRSTPASS_ENGINE", raising=False)
+    with pytest.raises(mm.MultimodalError, match="Grant allows"):
+        mm.execute_video_pipeline_multimodal(
+            storage, record,
+            clients={"meta": FakeMeta([_global_text()])})
+    assert captured["firstpass_engine"] == "single_frame"
+    assert captured["billable_client"].timeout_seconds == 45
+
+    captured.clear()
+    monkeypatch.setenv("FIRSTPASS_ENGINE", "contextual_batch")
+    with pytest.raises(mm.MultimodalError, match="Grant allows"):
+        mm.execute_video_pipeline_multimodal(
+            storage, record,
+            clients={"meta": FakeMeta([_global_text()])})
+    assert captured["firstpass_engine"] == "contextual_batch"
+    assert captured["billable_client"].timeout_seconds == 240.0
+
+def test_speech_claims_ceiling_is_65536() -> None:
+    """Speech claims must use the truncation-safe ceiling."""
+    assert mm.SPEECH_MAX_TOKENS == 65536
+
+
+def test_speech_claims_request_uses_raised_ceiling(
+        tmp_path: Path) -> None:
+    """The 65536 ceiling must reach the Meta request."""
+    fake = FakeMeta([_claims_text()])
+    _, call = mm.run_speech_claims(
+        fake, [{"turnId": 0}],  # type: ignore[arg-type]
+        tmp_path)
+    assert fake.calls[0]["max_output_tokens"] == 65536
+    assert fake.calls[0]["max_output_tokens"] == (
+        mm.SPEECH_MAX_TOKENS)
+    assert call.stage == "speech_claims"
+    assert call.status == "ok"
+
+
+def test_speech_claims_spanish_transcript_preserved(
+        tmp_path: Path) -> None:
+    """Spanish quotes, corrections, and conflicts must parse."""
+    text = json.dumps({"claims": [
+        {"claim_id": "c00", "turn_ids": [0],
+         "claim_kind": "ingredient_quantity_utterance",
+         "verbatim_quote": "necesitamos cuarenta gramos de harina",
+         "speaker": "A", "clip_local_start": 140,
+         "clip_local_end": 16700,
+         "interpretation": "Tangzhong flour amount uttered.",
+         "uncertainty": "Speech only; no scale verified."},
+        {"claim_id": "c01", "turn_ids": [1],
+         "claim_kind": "correction",
+         "verbatim_quote": "doscientos cuarenta no, doscientos "
+                           "gramos de agua",
+         "speaker": "A", "clip_local_start": 26940,
+         "clip_local_end": 38060,
+         "interpretation": "Self-corrected water amount.",
+         "uncertainty": "Replaces the first utterance."},
+        {"claim_id": "c02", "turn_ids": [2],
+         "claim_kind": "ingredient_quantity_utterance",
+         "verbatim_quote": "tres gramos de sal",
+         "speaker": "A", "clip_local_start": 382620,
+         "clip_local_end": 396380,
+         "interpretation": "Salt amount uttered.",
+         "uncertainty": "Conflicts with a dos gramos turn."},
+    ]})
+    fake = FakeMeta([text])
+    claims, call = mm.run_speech_claims(
+        fake, [{"turnId": 0}, {"turnId": 1},
+               {"turnId": 2}],  # type: ignore[arg-type]
+        tmp_path)
+    assert [c["claim_id"] for c in
+            claims["result"]["claims"]] == ["c00", "c01", "c02"]
+    assert "cuarenta gramos" in claims["result"][
+        "claims"][0]["verbatim_quote"]
+    assert call.estimate_usd is not None
+    assert (tmp_path / "speech_claims.json").is_file()
+
+
+def test_speech_claims_truncation_preserves_diagnostics(
+        tmp_path: Path) -> None:
+    """A ceiling-truncated response must fail with evidence.
+
+    Regression shape: output_tokens hit the ceiling and the
+    JSON ends mid-claim (the live 8192 failure ended inside
+    c32's interpretation field).
+    """
+    bad = ('{"claims": [{"claim_id": "c00", '
+           '"interpretation": "cut off mid-cl')
+    fake = FakeMeta([bad])
+    with pytest.raises(mm.MultimodalError,
+                       match="non-JSON output"):
+        mm.run_speech_claims(
+            fake, [{"turnId": 0}],  # type: ignore[arg-type]
+            tmp_path)
+    failed = json.loads(
+        (tmp_path / "speech_claims_failed.json").read_text(
+            encoding="utf-8"))
+    assert failed["request_id"] == "resp_fake1"
+    assert failed["usage"]["output_tokens"] == 50
+    assert failed["content_length"] == len(bad)
+    assert failed["content_head"] == bad
+    assert failed["content_tail"] == bad
+    assert (tmp_path / "speech_claims_failed.txt"
+            ).read_text(encoding="utf-8") == bad
+    assert not (tmp_path / "speech_claims.json").exists()
+
+
+def test_validation_ceiling_is_65536() -> None:
+    """Validation shares the Meta-verified 65536 ceiling."""
+    assert mm.VALIDATION_MAX_TOKENS == 65536
+
+
+def test_validation_request_uses_raised_ceiling() -> None:
+    """The validation adapter must send the raised ceiling."""
+    fake = FakeMeta([_validation_text()])
+    validator = mm.SparkValidationAdapter(fake)  # type: ignore[arg-type]
+    record = validator.validate(_merged())
+    assert fake.calls[0]["max_output_tokens"] == 65536
+    assert record["provider"] == "meta"
+
+
+def test_audio_stage_recovers_from_speech_failure(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed speech call must not retranscribe audio.
+
+    Mirrors the live run state: transcript + chunk records +
+    a speech_claims_failed pair exist, speech_claims.json
+    does not. Recovery re-merges reused chunks and issues
+    exactly one new speech request; the old failure files
+    stay for audit.
+    """
+    _audio_harness(tmp_path, monkeypatch, 400.0)
+    chunks = tmp_path / "asr_chunks"
+    chunks.mkdir()
+    for index, (start, end) in enumerate(
+            [(0.0, 330.0), (330.0, 400.0)]):
+        (chunks / f"chunk_{index:03d}.json").write_text(
+            json.dumps({
+                "index": index, "start_seconds": start,
+                "end_seconds": end,
+                "payload": _chunk_payload(f"part {index}", [
+                    {"turnId": 0, "speaker": "A",
+                     "startMs": 100, "endMs": 900,
+                     "transcript": f"part {index}"}],
+                    f"s{index}")}),
+            encoding="utf-8")
+    (tmp_path / "transcript.json").write_text(json.dumps({
+        "audioDurationMs": 400000, "sessionId": "s0",
+        "transcript": "part 0 part 1", "turns": [
+            {"turnId": 0, "speaker": "A", "startMs": 100,
+             "endMs": 900, "transcript": "part 0"},
+            {"turnId": 1, "speaker": "A", "startMs": 330100,
+             "endMs": 330900, "transcript": "part 1"}],
+        "chunked": True}), encoding="utf-8")
+    (tmp_path / "speech_claims_failed.json").write_text(
+        json.dumps({"request_id": "resp_old_fail"}),
+        encoding="utf-8")
+    (tmp_path / "speech_claims_failed.txt").write_text(
+        '{"claims": [{"cut', encoding="utf-8")
+    asr = FakeASR([])
+    meta = FakeMeta([_claims_text()])
+    transcript, claims, calls = mm.run_audio_stage(
+        meta, asr, Path("clip.mp4"),  # type: ignore[arg-type]
+        tmp_path)
+    assert asr.paths == []
+    assert [c.stage for c in calls] == [
+        "audio_transcribe_chunk_000",
+        "audio_transcribe_chunk_001", "speech_claims"]
+    assert calls[0].status == "reused"
+    assert calls[1].status == "reused"
+    assert calls[2].status == "ok"
+    assert len(meta.calls) == 1
+    assert meta.calls[0]["max_output_tokens"] == 65536
+    assert transcript is not None
+    assert claims is not None
+    assert (tmp_path / "speech_claims.json").is_file()
+    old = json.loads(
+        (tmp_path / "speech_claims_failed.json").read_text(
+            encoding="utf-8"))
+    assert old["request_id"] == "resp_old_fail"
+
+
+def test_executor_recovers_failed_run_end_to_end(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recovery bills only the incomplete stages.
+
+    Seeds a failed-run work dir (global done, frames done,
+    ASR chunks done, speech failed) and drives the real
+    executor to completion with fakes: zero new global,
+    frame, or ASR calls; new speech + validation Meta
+    calls; new Baseten segments + fusion.
+    """
+    import bakery_intelligence.api.pipeline as pipeline_mod
+    import bakery_intelligence.video.intake as intake
+
+    storage, record = _smoke_executor(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        intake, "probe_video",
+        lambda path: {"duration_seconds": 5.0})
+    monkeypatch.setattr(mm, "has_audio_stream",
+                        lambda path: True)
+    monkeypatch.setattr(
+        mm, "cut_subclip",
+        lambda src, start, length, dest: dest.write_bytes(
+            b"clip"))
+    run_id = "run_0123456789ab"
+    work = tmp_path / "runs" / run_id / "work"
+    mm_dir = work / "multimodal"
+    (mm_dir / "asr_chunks").mkdir(parents=True)
+    (work / "pipeline_state.json").write_text(json.dumps({
+        "stage": "firstpass_done"}), encoding="utf-8")
+    (mm_dir / "global.json").write_text(json.dumps({
+        "model": mm.SPARK_MODEL, "provider": "meta",
+        "prompt_version": "v1.0", "request_id": "resp_global",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "result": json.loads(_global_text()),
+    }), encoding="utf-8")
+    (mm_dir / "audio.wav").write_bytes(b"fake-wav")
+    (mm_dir / "asr_chunks" / "chunk_000.json").write_text(
+        json.dumps({
+            "index": 0, "start_seconds": 0.0,
+            "end_seconds": 5.0,
+            "payload": _chunk_payload("hello", [
+                {"turnId": 0, "speaker": "A",
+                 "startMs": 100, "endMs": 900,
+                 "transcript": "hello"}],
+                "s0")}),
+        encoding="utf-8")
+    (mm_dir / "speech_claims_failed.json").write_text(
+        json.dumps({"request_id": "resp_old_fail"}),
+        encoding="utf-8")
+
+    def fake_run(**kwargs: Any) -> dict[str, bytes]:
+        return {
+            "firstpass_report.json": json.dumps({
+                "requests_sent": 5,
+                "cost_usd_estimated": 0.5,
+                "input_tokens": 10, "output_tokens": 5,
+                "reasoning_output_tokens": 0,
+            }).encode("utf-8"),
+            "pipeline_summary.json": b"{}",
+            "measurements.json": (
+                b'{"measurements": []}'),
+            "recipe_draft.json": b"{}",
+            "weighing_event.json": b"{}",
+        }
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_pipeline_from_path", fake_run)
+    meta = FakeMeta([_claims_text(), _validation_text()])
+    asr = FakeASR([])
+    fusion_text = json.dumps(_proposal(ingredients=[
+        {"name": "cinnamon", "quantity": None,
+         "unit": None, "provenance": "ai_estimated",
+         "basis": "Culinary estimate; no reading."}]))
+    baseten = FakeBaseten([_segment_text(0), fusion_text])
+    artifacts = mm.execute_video_pipeline_multimodal(
+        storage, record,
+        clients={"meta": meta, "asr": asr,
+                 "baseten": baseten})
+    assert meta.uploads == []
+    assert len(meta.calls) == 2
+    assert [c["max_output_tokens"] for c in
+            meta.calls] == [65536, 65536]
+    assert asr.paths == []
+    assert len(baseten.calls) == 2
+    assert baseten.calls[0]["max_tokens"] == (
+        mm.SEGMENT_MAX_TOKENS)
+    assert baseten.calls[1]["max_tokens"] == (
+        mm.FUSION_MAX_TOKENS)
+    assert "multimodal_speech_claims.json" in artifacts
+    assert "multimodal_fusion_recipe.json" in artifacts
+    assert "multimodal_cost_report.json" in artifacts
+    report = json.loads(
+        (mm_dir / "cost_report.json").read_text(
+            encoding="utf-8"))
+    by_stage = {c["stage"]: c for c in report["calls"]}
+    assert by_stage["global"]["status"] == "reused"
+    assert by_stage["global"]["estimate_usd"] == 0.0
+    assert by_stage["frames_firstpass"]["status"] == "reused"
+    assert by_stage["frames_firstpass"][
+        "estimate_usd"] == 0.0
+    assert by_stage["audio_transcribe_chunk_000"][
+        "status"] == "reused"
+    assert by_stage["speech_claims"]["status"] == "ok"
+    assert by_stage["validation"]["status"] == "ok"
+    assert by_stage["fusion"]["status"] == "ok"
+    summary = json.loads(
+        (mm_dir / "pipeline_summary_multimodal.json"
+         ).read_text(encoding="utf-8"))
+    assert summary["meta_calls_used"] <= 10
+    old = json.loads(
+        (mm_dir / "speech_claims_failed.json").read_text(
+            encoding="utf-8"))
+    assert old["request_id"] == "resp_old_fail"
+
+
+def test_merged_carries_reading_accounting() -> None:
+    """Truncation accounting must survive the merge."""
+    bundle = dict(_merged())
+    bundle["readings"] = [{"t": 1.0, "value": 40.0,
+                           "unit": None}]
+    bundle["readings_usable_total"] = 196
+    bundle["readings_truncated"] = True
+    merged = mm.build_merged_evidence(
+        bundle, {"result": {}}, [], None, None)
+    assert merged["readings_total"] == 1
+    assert merged["readings_usable_total"] == 196
+    assert merged["readings_truncated"] is True
+
+
+def test_merged_legacy_bundle_without_accounting() -> None:
+    """Bundles without the new keys read as untruncated."""
+    bundle = dict(_merged())
+    bundle["readings"] = [{"t": 1.0, "value": 40.0,
+                           "unit": None}]
+    bundle.pop("readings_usable_total", None)
+    bundle.pop("readings_truncated", None)
+    merged = mm.build_merged_evidence(
+        bundle, {"result": {}}, [], None, None)
+    assert merged["readings_total"] == 1
+    assert merged["readings_usable_total"] == 1
+    assert merged["readings_truncated"] is False

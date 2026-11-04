@@ -18,8 +18,10 @@ from bakery_intelligence.recipe_export.labels import (
     TEXT,
     adjustment_note,
     clip_label,
+    ingredient_role,
     lang_of,
     row_source,
+    split_display_name,
 )
 
 INK = RGBColor(0x1A, 0x18, 0x15)
@@ -75,11 +77,21 @@ def build_docx(recipe: dict[str, Any]) -> bytes:
                            labels["col_source"]]):
         cell.text = text
     for table_row, row in zip(table.rows[1:], rows):
-        values = [str(row.get("name") or ""),
-                  _amount(row.get("quantity"), language),
+        primary, qualifier = split_display_name(
+            row.get("name"))
+        values = [_amount(row.get("quantity"), language),
                   str(row.get("unit") or "-"),
                   row_source(row, language)]
-        for cell, value in zip(table_row.cells, values):
+        name_cell = table_row.cells[0]
+        name_cell.text = ""
+        name_cell.paragraphs[0].add_run(primary).bold = True
+        if qualifier:
+            name_cell.add_paragraph().add_run(
+                qualifier).italic = True
+        if ingredient_role(row) == "intermediate":
+            name_cell.add_paragraph().add_run(
+                labels["intermediate_note"]).italic = True
+        for cell, value in zip(table_row.cells[1:], values):
             cell.text = value
         detail = adjustment_note(row, language)
         if detail:
@@ -93,7 +105,9 @@ def build_docx(recipe: dict[str, Any]) -> bytes:
         clip = item.get("clip_id") or ""
         if clip != current_clip:
             current_clip = clip
-            _heading(document, clip_label(clip, language), level=2)
+            heading = clip_label(clip, language)
+            if heading:
+                _heading(document, heading, level=2)
         paragraph = document.add_paragraph(
             style="List Number")
         run = paragraph.add_run(str(item.get("instruction") or ""))

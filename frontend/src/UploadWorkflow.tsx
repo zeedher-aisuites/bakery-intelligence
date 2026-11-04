@@ -9,9 +9,14 @@ import {
   uploadVideo,
 } from "./api";
 import {
+  FIRSTPASS_ENGINE_SCALE,
+  FIRSTPASS_ENGINE_SINGLE,
   META_WORKFLOW,
   buildMetaGrant,
+  extraMetaRequests,
+  firstpassRequests,
   formatDuration,
+  scaleWorstCaseUsd,
 } from "./upload";
 
 const STAGE_LABELS: Record<string, string> = {
@@ -19,7 +24,7 @@ const STAGE_LABELS: Record<string, string> = {
   running: "Processing",
   extracted: "Frames extracted — analysis running",
   firstpass_running: "Analyzing frames",
-  firstpass_done: "Analysis finished — building record",
+  firstpass_done: "Frame analysis finished — pipeline continues",
   completed: "Completed",
   failed: "Failed",
 };
@@ -27,8 +32,11 @@ const STAGE_LABELS: Record<string, string> = {
 function stageLabel(progress: ProgressInfo | null): string {
   if (!progress) return "Queued";
   if (progress.status === "completed") return "Completed";
-  if (progress.status === "failed") return "Failed";
-  return STAGE_LABELS[progress.stage] ?? progress.stage;
+  const detail = progress.pipeline_stage
+    ? ` \u2014 ${progress.pipeline_stage}` : "";
+  if (progress.status === "failed") return `Failed${detail}`;
+  const base = STAGE_LABELS[progress.stage] ?? progress.stage;
+  return `${base}${detail}`;
 }
 
 export default function UploadWorkflow(props: {
@@ -43,6 +51,7 @@ export default function UploadWorkflow(props: {
   const [error, setError] = useState<string | null>(null);
   const [recipeName, setRecipeName] = useState("");
   const [language, setLanguage] = useState("en");
+  const [engine, setEngine] = useState(FIRSTPASS_ENGINE_SINGLE);
   const [confirmPaid, setConfirmPaid] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [job, setJob] = useState<{
@@ -101,7 +110,9 @@ export default function UploadWorkflow(props: {
     setSubmitting(true);
     setError(null);
     try {
-      const grant = buildMetaGrant(upload.estimated_frames);
+      const grant = buildMetaGrant(
+        upload.estimated_frames, "web-user", new Date(),
+        engine);
       const created = await createUploadAnalysis(
         upload.upload_id, META_WORKFLOW,
         grant as unknown as Record<string, unknown> | null);
@@ -289,6 +300,49 @@ export default function UploadWorkflow(props: {
             AI will analyze your video and prepare a recipe with
             ingredients and preparation steps for your review.
           </p>
+          <label className="field">
+            <span>Analysis engine</span>
+            <select
+              value={engine}
+              aria-label="Analysis engine"
+              onChange={(event) => setEngine(event.target.value)}
+            >
+              <option value={FIRSTPASS_ENGINE_SINGLE}>
+                Detailed frame analysis
+              </option>
+              <option value={FIRSTPASS_ENGINE_SCALE}>
+                Fast scale reading
+              </option>
+            </select>
+          </label>
+          <p className="muted small">
+            {engine === FIRSTPASS_ENGINE_SCALE
+              ? "Reads scale displays in parallel batches of 10. "
+                + "Much faster; every reading stays reviewable "
+                + "and must be verified before use."
+              : "Examines frames one by one. Slowest; richest "
+                + "per-frame detail."}
+          </p>
+          <dl className="summary-grid">
+            <div><dt>Authorized Meta requests</dt>
+              <dd>{firstpassRequests(
+                upload.estimated_frames, engine)
+                + extraMetaRequests(upload.estimated_frames)
+              } ({
+                firstpassRequests(upload.estimated_frames, engine)
+              } frame analysis + {
+                extraMetaRequests(upload.estimated_frames)
+              } pipeline)</dd></div>
+            <div><dt>Spending ceiling</dt>
+              <dd>Enforced automatically</dd></div>
+            {engine === FIRSTPASS_ENGINE_SCALE && (
+              <div><dt>Scale cost bound</dt>
+                <dd>at most US${
+                  scaleWorstCaseUsd(firstpassRequests(
+                    upload.estimated_frames, engine)).toFixed(2)
+                } for frame analysis (worst case)</dd></div>
+            )}
+          </dl>
           <label className="confirm-row">
             <input
               type="checkbox"
@@ -336,11 +390,16 @@ export default function UploadWorkflow(props: {
               <dd>{progress?.frames_processed ?? "—"}
                 {progress?.frames_total
                   ? ` of ${progress.frames_total}` : ""}</dd></div>
-            <div><dt>Progress</dt>
+            <div><dt>Frame progress</dt>
               <dd>{progress?.percent !== null
                 && progress?.percent !== undefined
                 ? `${progress.percent}%`
                 : "Not available yet"}</dd></div>
+            <div><dt>Pipeline stage</dt>
+              <dd>{progress?.pipeline_stage ?? "Not started yet"}</dd></div>
+            <div><dt>Recipe artifacts</dt>
+              <dd>{progress?.recipe_ready
+                ? "Ready for review" : "Not ready yet"}</dd></div>
             <div><dt>Last update</dt>
               <dd>{progress?.updated_at ?? "—"}</dd></div>
           </dl>

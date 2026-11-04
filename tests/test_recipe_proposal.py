@@ -508,3 +508,96 @@ def test_fusion_checks_bundle_falls_back_without_merge(
     same = app_module._fusion_checks_bundle(  # noqa: SLF001
         bundle, tmp_path / "runs" / "run_x")
     assert same["readings"] == [{"value": 100.0}]
+
+
+def test_bundle_records_reading_truncation(tmp_path: Path):
+    run_dir = tmp_path / "runs" / "run_big"
+    _seed_run(run_dir)
+    artifacts = run_dir / "artifacts"
+    stored = json.loads(
+        (artifacts / "measurements.json").read_text(
+            encoding="utf-8"))
+    stored["measurements"] = [
+        {"frame_index": n, "timestamp_seconds": float(n),
+         "value": float(n), "unit_observed": None,
+         "value_status": "ok"}
+        for n in range(45)
+    ]
+    (artifacts / "measurements.json").write_text(
+        json.dumps(stored), encoding="utf-8")
+    bundle = proposal_mod.build_evidence_bundle(
+        run_dir, "Big", "en")
+    assert len(bundle["readings"]) == 40
+    assert bundle["readings_total"] == 40
+    assert bundle["readings_usable_total"] == 45
+    assert bundle["readings_truncated"] is True
+
+
+def test_bundle_no_truncation_when_small(tmp_path: Path):
+    run_dir = tmp_path / "runs" / "run_x"
+    _seed_run(run_dir)
+    bundle = proposal_mod.build_evidence_bundle(
+        run_dir, "Small", "en")
+    assert bundle["readings_total"] == 2
+    assert bundle["readings_usable_total"] == 2
+    assert bundle["readings_truncated"] is False
+
+
+def test_snapshot_provenance_carries_truncation(
+        tmp_path: Path):
+    run_dir = tmp_path / "runs" / "run_x"
+    _seed_run(run_dir)
+    bundle = proposal_mod.build_evidence_bundle(
+        run_dir, "Small", "en")
+    bundle["readings_usable_total"] = 196
+    bundle["readings_truncated"] = True
+    snapshot = proposal_mod.assemble_snapshot(
+        bundle, _parsed(), {"recipe_id": "r1", "run_id": "x",
+                            "generated_at": "t"})
+    assert snapshot["provenance"]["readings_used"] == 2
+    assert snapshot["provenance"][
+        "readings_usable_total"] == 196
+    assert snapshot["provenance"]["readings_truncated"] is True
+
+
+def test_row_source_distinguishes_audio_estimates():
+    from bakery_intelligence.recipe_export.labels import (
+        ingredient_role,
+        split_display_name,
+    )
+    heard = {"quantity_status": "ai_estimated",
+             "quantity_basis": "Audio claims 100 g sugar.",
+             "evidence": []}
+    assert row_source(heard, "en") == "Mentioned in audio"
+    assert row_source(heard, "es") == "Mencionado en el audio"
+    seen = {"quantity_status": "ai_estimated",
+            "quantity_basis": "Two yolks counted visible.",
+            "evidence": []}
+    assert row_source(seen, "en") == "Seen in video"
+    both = {"quantity_status": "ai_estimated",
+            "quantity_basis": "Observed pour; audio says milk.",
+            "evidence": []}
+    assert row_source(both, "en") == (
+        "Seen in video + Mentioned in audio")
+    pure = {"quantity_status": "ai_estimated",
+            "quantity_basis": "Culinary estimate.",
+            "evidence": []}
+    assert row_source(pure, "en") == "Suggested by AI"
+    assert row_source(
+        {"quantity_status": "seen_video",
+         "quantity_basis": "x", "evidence": []},
+        "en") == "Seen in video"
+    assert split_display_name(
+        "white powder (audio describes as flour)") == (
+        "white powder", "audio describes as flour")
+    assert split_display_name("flour") == ("flour", None)
+    assert split_display_name("flour (audio") == (
+        "flour (audio", None)
+    assert split_display_name("(orphan)") == (
+        "(orphan)", None)
+    assert ingredient_role(
+        {"name": "gel (cooked, added back to dough)",
+         "quantity_basis": ""}) == "intermediate"
+    assert ingredient_role(
+        {"name": "flour", "quantity_basis": "display 700"}
+    ) == "raw"

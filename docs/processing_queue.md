@@ -37,10 +37,14 @@
 - `POST /api/jobs/{run_id}/retry` requeues one failed job in
   place through a single conditional UPDATE. The original record,
   source, and evidence are preserved.
-- Billable workflows (`video_pipeline_meta`) are refused with
-  HTTP 409 at both the service and store layers. A paid run
-  requires a new authorized submission; retrying never invokes
-  inference from the frontend and never replays a grant.
+- Billable workflows (`video_pipeline_meta`,
+  `video_pipeline_multimodal`) are refused with HTTP 409 at
+  both the service and store layers. Retrying over HTTP never
+  invokes inference and never replays a grant. The only
+  recovery path for a failed paid run is the explicit worker
+  CLI (`--recover <run_id> --recover-note ...`), which
+  requeues conditionally, reuses persisted stage outputs
+  without rebilling them, and records the operator note.
 - Retries stop at 3 total attempts. Stale-job recovery and atomic
   claiming semantics are unchanged.
 

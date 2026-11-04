@@ -437,10 +437,14 @@ def test_meta_request_cap_halts_before_dispatch(
     _patch_builder(monkeypatch, sdk)
     _set_key(monkeypatch)
     assert run_once(store, storage, "worker-1") == record.run_id
-    assert service.get(record.run_id).status == STATUS_COMPLETED
+    final = service.get(record.run_id)
+    assert final.status == STATUS_FAILED
+    assert "terminated" in (final.error or "")
     assert len(sdk.calls) == 2
-    report = json.loads(storage.read_artifact(
-        record.run_id, "firstpass_report.json"))
+    report = json.loads((
+        storage.run_work_dir(record.run_id) / "firstpass"
+        / "reports" / "run_report.json").read_text(
+            encoding="utf-8"))
     assert report["budget"]["stopped_reason"] == STOP_REQUEST_LIMIT
     assert report["budget"]["remaining_frame_indices"] == [20]
 
@@ -766,3 +770,31 @@ def test_api_fake_rejects_grant(tmp_path: Path) -> None:
     )
     assert response.status_code == 422
     assert "does not accept" in response.json()["detail"]
+
+
+def test_grant_engine_key_optional_roundtrip() -> None:
+    assert parse_grant(_grant()).firstpass_engine is None
+    grant = parse_grant(
+        _grant(firstpass_engine="parallel_scale"))
+    assert grant.firstpass_engine == "parallel_scale"
+    payload = json.loads(grant_to_json(grant))
+    assert payload["firstpass_engine"] == "parallel_scale"
+    assert parse_grant(payload).firstpass_engine == (
+        "parallel_scale")
+    legacy = json.loads(grant_to_json(parse_grant(_grant())))
+    assert "firstpass_engine" not in legacy
+
+
+def test_grant_engine_rejects_bad_values() -> None:
+    for bad in ("", "   ", 123, "x" * 65, True):
+        with pytest.raises(GrantError):
+            parse_grant(_grant(firstpass_engine=bad))
+
+
+def test_grant_confirmation_ignores_engine() -> None:
+    grant = parse_grant(
+        _grant(firstpass_engine="parallel_scale"))
+    assert grant.confirmation == confirmation_sentence(
+        grant.workflow, grant.model, grant.max_requests,
+        grant.token_budget, grant.max_frames,
+        grant.operator)

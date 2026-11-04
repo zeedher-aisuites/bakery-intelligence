@@ -149,3 +149,71 @@ def test_exports_reflect_saved_state(client: TestClient,
     words = "\n".join(p.text for p in Document(doctarget).paragraphs)
     assert "Cinnamon Rolls" in words
     assert "Mix." in words
+
+
+def _seed_job_and_recipe(tmp_path: Path, run_id: str,
+                         name: str) -> TestClient:
+    from bakery_intelligence.api.jobs import JobRecord
+    from bakery_intelligence.api.recipe_editor import (
+        create_record,
+    )
+    from bakery_intelligence.api.store import SqliteJobStore
+
+    root = tmp_path / "runs_api"
+    create_record(root, name, "en", source_run_id=run_id)
+    store = SqliteJobStore(root / "jobs.sqlite3")
+    store.create(JobRecord(
+        run_id=run_id,
+        workflow="video_pipeline_multimodal",
+        source_object_id="clip.mp4"))
+    return TestClient(build_app(storage_dir=root))
+
+
+def test_cards_mark_failed_run_as_failed(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.api.store import SqliteJobStore
+
+    client = _seed_job_and_recipe(
+        tmp_path, "run_failed_1", "Failed Dish")
+    store = SqliteJobStore(
+        tmp_path / "runs_api" / "jobs.sqlite3")
+    assert store.fail("run_failed_1", None,
+                      "2026-11-04T00:00:00+00:00",
+                      "Stage audio failed: truncated")
+    cards = client.get("/api/recipes").json()["recipes"]
+    assert len(cards) == 1
+    assert cards[0]["status"] == "failed"
+    assert "truncated" in (cards[0]["build_error"] or "")
+    assert cards[0]["ingredients"] == 0
+
+
+def test_cards_mark_completed_run_awaiting_build(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.api.store import SqliteJobStore
+
+    client = _seed_job_and_recipe(
+        tmp_path, "run_done_1", "Done Dish")
+    store = SqliteJobStore(
+        tmp_path / "runs_api" / "jobs.sqlite3")
+    claimed = store.claim_next(
+        "w1", "2026-11-04T00:00:00+00:00")
+    assert claimed is not None
+    assert store.complete("run_done_1", "w1",
+                          "2026-11-04T00:00:00+00:00",
+                          None, {})
+    cards = client.get("/api/recipes").json()["recipes"]
+    assert cards[0]["status"] == "awaiting_build"
+
+
+def test_cards_keep_active_run_processing(
+        tmp_path: Path) -> None:
+    client = _seed_job_and_recipe(
+        tmp_path, "run_live_1", "Live Dish")
+    cards = client.get("/api/recipes").json()["recipes"]
+    assert cards[0]["status"] == "processing"
+
+
+def test_cards_snapshot_status_untouched(
+        client: TestClient) -> None:
+    cards = client.get("/api/recipes").json()["recipes"]
+    assert cards[0]["status"] == "draft"

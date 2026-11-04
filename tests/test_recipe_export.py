@@ -260,10 +260,11 @@ def _pdf_snapshot(ingredients, method=None, language="es"):
 
 
 def _pdf_row(name, quantity=100.0, unit="g",
-             status="seen_video"):
+             status="seen_video",
+             basis="Stable display."):
     return {"name": name, "quantity": quantity,
             "unit": unit, "quantity_status": status,
-            "quantity_basis": "Stable display.",
+            "quantity_basis": basis,
             "evidence": []}
 
 
@@ -323,7 +324,8 @@ def test_pdf_multipage_spanish_unicode(tmp_path):
         _pdf_row(f"Ingrediente número {n} con descripción "
                  f"larga以上的 ñandú y azúcar glasé",
                  quantity=None, unit=None,
-                 status="ai_estimated")
+                 status="ai_estimated",
+                 basis="Model estimate; no reading.")
         for n in range(40)
     ]
     method = [{"number": n + 1, "clip_id": "uploaded_video",
@@ -341,3 +343,107 @@ def test_pdf_multipage_spanish_unicode(tmp_path):
     assert "azúcar glasé" in text
     assert "Sugerido por IA" in text
     assert "Mezcle el ingrediente 15" in text
+
+
+def test_pdf_splits_descriptive_names(tmp_path):
+    import pymupdf
+
+    rows = [_pdf_row(
+        "white fine powder (audio describes as flour)",
+        quantity=40.0, status="seen_video")]
+    shot = _pdf_snapshot(rows, language="en")
+    target = tmp_path / "split.pdf"
+    target.write_bytes(pdf_mod.build_pdf(shot))
+    with pymupdf.open(target) as doc:
+        text = "\n".join(
+            page.get_text() for page in doc)
+    assert "white fine powder" in text
+    assert "audio describes as flour" in text
+    assert "Seen in video" in text
+
+
+def test_pdf_marks_intermediate_preparation(tmp_path):
+    import pymupdf
+
+    rows = [_pdf_row(
+        "gel (cooked, added back to dough)",
+        quantity=None, unit=None, status="ai_estimated",
+        basis="Product of earlier steps.")]
+    shot = _pdf_snapshot(rows, language="en")
+    target = tmp_path / "inter.pdf"
+    target.write_bytes(pdf_mod.build_pdf(shot))
+    with pymupdf.open(target) as doc:
+        text = "\n".join(
+            page.get_text() for page in doc)
+    assert "Prepared during this recipe" in text
+    assert "Not determined" in text
+
+
+def test_pdf_hides_internal_clip_ids(tmp_path):
+    import pymupdf
+
+    method = [
+        {"number": 1, "clip_id": "uploaded_video",
+         "instruction": "First internal step."},
+        {"number": 2, "clip_id": "run_preparation",
+         "instruction": "Second part step."},
+    ]
+    shot = _pdf_snapshot([], method, language="en")
+    target = tmp_path / "clips.pdf"
+    target.write_bytes(pdf_mod.build_pdf(shot))
+    with pymupdf.open(target) as doc:
+        text = "\n".join(
+            page.get_text() for page in doc)
+    assert "uploaded_video" not in text
+    assert "unknown clip" not in text.lower()
+    assert "Part 1 - Preparation" in text
+    assert "First internal step." in text
+
+
+def test_pdf_method_step_moved_whole(tmp_path):
+    import pymupdf
+
+    filler = [
+        {"number": n + 1, "clip_id": "uploaded_video",
+         "instruction": "Short filler instruction here."}
+        for n in range(30)
+    ]
+    long_step = {
+        "number": 31, "clip_id": "uploaded_video",
+        "instruction": " ".join(
+            ["Carefully fold the dough over itself"] * 12)
+        + "."}
+    shot = _pdf_snapshot([], filler + [long_step],
+                         language="en")
+    target = tmp_path / "keep.pdf"
+    target.write_bytes(pdf_mod.build_pdf(shot))
+    with pymupdf.open(target) as doc:
+        assert doc.page_count >= 2
+        pages = [i for i, page in enumerate(doc)
+                 if "Carefully fold" in page.get_text()]
+    assert len(pages) == 1
+
+
+def test_docx_splits_names_and_hides_clips(tmp_path):
+    from docx import Document
+
+    from bakery_intelligence.recipe_export import docx as docx_mod
+
+    rows = [_pdf_row(
+        "white powder (audio describes as flour)",
+        quantity=40.0, status="seen_video",
+        basis="Stable legible display 40.")]
+    method = [{"number": 1, "clip_id": "uploaded_video",
+               "instruction": "Do the thing."}]
+    shot = _pdf_snapshot(rows, method, language="en")
+    target = tmp_path / "split.docx"
+    target.write_bytes(docx_mod.build_docx(shot))
+    saved = Document(str(target))
+    text = "\n".join(
+        p.text for p in saved.paragraphs) + "\n" + "\n".join(
+        cell.text for table in saved.tables
+        for row in table.rows for cell in row.cells)
+    assert "white powder" in text
+    assert "audio describes as flour" in text
+    assert "uploaded_video" not in text
+    assert "Do the thing." in text
