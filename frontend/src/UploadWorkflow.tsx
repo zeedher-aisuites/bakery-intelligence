@@ -2,13 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   ProgressInfo,
   UploadInfo,
+  createRecipe,
   createUploadAnalysis,
   fetchProgress,
   formatBytes,
   uploadVideo,
 } from "./api";
 import {
-  MAX_AUTHORIZED_COST_USD,
   META_WORKFLOW,
   buildMetaGrant,
   formatDuration,
@@ -34,16 +34,19 @@ function stageLabel(progress: ProgressInfo | null): string {
 export default function UploadWorkflow(props: {
   onOpenReview: (runId: string) => void;
   onViewQueue?: (runId: string) => void;
+  onOpenRecipe?: (recipeId: string) => void;
 }): JSX.Element {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState<number | null>(null);
   const [upload, setUpload] = useState<UploadInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [recipeName, setRecipeName] = useState("");
+  const [language, setLanguage] = useState("en");
   const [confirmPaid, setConfirmPaid] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [job, setJob] = useState<{
-    run_id: string; workflow: string;
+    run_id: string; workflow: string; recipe_id: string | null;
   } | null>(null);
   const [progress, setProgress] = useState<ProgressInfo | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -90,6 +93,11 @@ export default function UploadWorkflow(props: {
 
   async function startRecipeAnalysis(): Promise<void> {
     if (!upload || submitting) return;
+    const name = recipeName.trim();
+    if (!name) {
+      setError("Enter a recipe name before generating the recipe.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -97,8 +105,30 @@ export default function UploadWorkflow(props: {
       const created = await createUploadAnalysis(
         upload.upload_id, META_WORKFLOW,
         grant as unknown as Record<string, unknown> | null);
-      setJob({ run_id: created.run_id, workflow: created.workflow });
+      let recipeId: string | null = null;
+      try {
+        const record = await createRecipe({
+          name,
+          language,
+          source_run_id: created.run_id,
+        });
+        recipeId = record.recipe_id;
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? `Analysis started, but the recipe record could not be created (${err.message}).`
+            : "Analysis started, but the recipe record could not be created.",
+        );
+      }
+      setJob({
+        run_id: created.run_id,
+        workflow: created.workflow,
+        recipe_id: recipeId,
+      });
       setProgress(null);
+      if (recipeId && props.onOpenRecipe) {
+        props.onOpenRecipe(recipeId);
+      }
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Could not start analysis.");
@@ -130,6 +160,7 @@ export default function UploadWorkflow(props: {
 
   const canSubmit = upload !== null
     && !upload.exceeds_frame_cap
+    && recipeName.trim() !== ""
     && confirmPaid
     && !submitting;
 
@@ -179,6 +210,28 @@ export default function UploadWorkflow(props: {
             ({formatBytes(file.size)})
           </p>
         )}
+        <label className="field">
+          <span>Recipe Name</span>
+          <input
+            type="text"
+            value={recipeName}
+            maxLength={120}
+            placeholder="e.g. XL Cinnamon Rolls"
+            aria-label="Recipe Name"
+            onChange={(event) => setRecipeName(event.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>Recipe Language</span>
+          <select
+            value={language}
+            aria-label="Recipe Language"
+            onChange={(event) => setLanguage(event.target.value)}
+          >
+            <option value="en">English</option>
+            <option value="es">Español</option>
+          </select>
+        </label>
         {uploading !== null && (
           <div className="progress-block">
             <div className="progress-track">
@@ -233,9 +286,8 @@ export default function UploadWorkflow(props: {
             </div>
           </div>
           <p className="muted">
-            AI will analyze your video and prepare measurement evidence
-            for your review. You will check the findings first; recipe
-            reconstruction happens after review.
+            AI will analyze your video and prepare a recipe with
+            ingredients and preparation steps for your review.
           </p>
           <label className="confirm-row">
             <input
@@ -244,9 +296,8 @@ export default function UploadWorkflow(props: {
               onChange={(event) => setConfirmPaid(event.target.checked)}
             />
             <span>
-              I authorize AI processing for this video, with a
-              maximum budget of US$
-              {MAX_AUTHORIZED_COST_USD.toFixed(0)}.
+              I authorize AI processing of this video and understand
+              that it may incur processing costs.
             </span>
           </label>
           <div className="flow-actions">
@@ -305,10 +356,19 @@ export default function UploadWorkflow(props: {
             </p>
           )}
           <div className="flow-actions">
-            {progress?.status === "completed" && (
+            {job.recipe_id && props.onOpenRecipe && (
               <button
                 type="button"
                 className="btn-primary"
+                onClick={() => props.onOpenRecipe?.(job.recipe_id as string)}
+              >
+                Open recipe
+              </button>
+            )}
+            {progress?.status === "completed" && (
+              <button
+                type="button"
+                className="btn-ghost"
                 onClick={() => props.onOpenReview(job.run_id)}
               >
                 Open evidence review

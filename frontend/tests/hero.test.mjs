@@ -51,21 +51,33 @@ test("landing guides chefs to the New Analysis workflow", () => {
     "developer empty-state instructions are still present");
 });
 
-test("navigation keeps only Home, New analysis, and queue", () => {
+test("navigation keeps only Home, New Recipe, and Chef Review", () => {
   const src = fs.readFileSync(APP_SRC, "utf-8");
   assert.ok(src.includes("Home"), "Home nav item is missing");
-  assert.ok(src.includes("+ New analysis"), "New analysis nav item is missing");
-  assert.ok(src.includes("My recipes"), "queue nav item is missing");
+  assert.ok(src.includes("New Recipe"), "New Recipe nav item is missing");
+  assert.ok(src.includes("Chef Review"), "Chef Review nav item is missing");
+  assert.ok(!src.includes("My recipes"),
+    "redundant My Recipes nav item is still present");
   assert.ok(!src.includes("Analyses"),
     "redundant Analyses nav item is still present");
   assert.ok(src.includes('backend.kind !== "online"'),
     "backend badge is not hidden behind the online check");
+  assert.ok(src.includes("brand-home"),
+    "brand logo does not navigate home");
 });
 
-test("featured demo renders only when a demo exists", () => {
+test("landing shows Your Recipes cards, not analyses", () => {
   const src = fs.readFileSync(LANDING_SRC, "utf-8");
-  assert.ok(src.includes("(featured ? ("),
-    "featured section lost its existence guard");
-  assert.ok(!src.match(/\)\s*:\s*\(\s*<section id="analyses"/),
-    "empty analyses section must not render without a demo");
+  assert.ok(src.includes("Your Recipes"),
+    "recipe card section is missing");
+  assert.ok(src.includes("View Recipe"),
+    "recipe card action is missing");
+  assert.ok(src.includes("listRecipes"),
+    "landing does not load recipe cards from the API");
+  assert.ok(!src.includes("Your analyses"),
+    "analysis-centered section is still present");
+  assert.ok(!src.includes("View your analyses"),
+    "analysis-centered action is still present");
+  assert.ok(!src.includes("Featured demonstration"),
+    "featured demo section is still present");
 });

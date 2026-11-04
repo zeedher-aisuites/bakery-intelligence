@@ -263,3 +263,12 @@ frontend/.env.local
 experiments/native_video_understanding/
 experiments/native_video_wonder/
 experiments/native_video_baseten/
+
+# Bakery Intelligence: Playwright QA artifacts are local-only. The qa/
+# scripts stay untracked-but-present; dependencies, screenshots, traces,
+# and reports must never be committed.
+qa/node_modules/
+qa/shots/
+qa/playwright-report/
+qa/test-results/
+qa/.auth/

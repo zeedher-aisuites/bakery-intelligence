@@ -29,15 +29,20 @@ import time
 from pathlib import Path
 from typing import Any
 
+from bakery_intelligence.adversarial.live import _load_local_env
 from bakery_intelligence.api.jobs import (
     SMOKE_RESULT_ARTIFACT,
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_STORAGE_SMOKE,
     WORKFLOW_VIDEO_PIPELINE_META,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
     WORKFLOW_VIDEO_RECONSTRUCT,
     JobRecord,
     utc_now_iso,
+)
+from bakery_intelligence.api.multimodal import (
+    execute_video_pipeline_multimodal,
 )
 from bakery_intelligence.api.offline import (
     execute_offline_reconstruct,
@@ -87,6 +92,7 @@ WORKFLOW_MAX_ATTEMPTS = {
 # billable job fails explicitly and requires deliberate
 # operator action to resume or resubmit.
 BILLABLE_WORKFLOWS: frozenset[str] = frozenset({
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
     WORKFLOW_VIDEO_PIPELINE_META,
 })
 
@@ -128,6 +134,7 @@ _EXECUTORS = {
     WORKFLOW_STORAGE_SMOKE: execute_storage_smoke,
     WORKFLOW_OFFLINE_RECONSTRUCT: execute_offline_reconstruct,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE: execute_video_pipeline_offline,
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL: execute_video_pipeline_multimodal,
     WORKFLOW_VIDEO_PIPELINE_META: execute_video_pipeline_meta,
 }
 
@@ -294,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true",
                         help="Execute at most one job, then exit.")
     args = parser.parse_args(argv)
+    _load_local_env()
 
     root = args.storage_dir or (Path.cwd() / "runs_api")
     storage = LocalStorageBackend(root)

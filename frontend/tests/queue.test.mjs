@@ -20,7 +20,7 @@ const queued = {
   error: null, claimed_by: null, attempts: 0,
 };
 const metaFailed = {
-  ...queued, status: "failed", workflow: "video_pipeline_meta",
+  ...queued, status: "failed", workflow: "video_pipeline_multimodal",
   error: "Pipeline video is 9 bytes; limit is 1.",
   error_category: "validation", attempts: 1,
 };

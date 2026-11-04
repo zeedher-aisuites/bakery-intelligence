@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { formatEstimatedCost, type FirstpassCostReport } from "./cost";
 import AnalysisSummary from "./AnalysisSummary";
 import EvidenceExplorer from "./EvidenceExplorer";
 import ObservationReview from "./ObservationReview";
@@ -8,30 +7,25 @@ import GeneratePanel from "./GeneratePanel";
 import RecipeReview from "./RecipeReview";
 import { displaySourceName } from "./queue";
 import {
-  AnalysisStatus,
   ApiError,
   WORKFLOW_META,
   WORKFLOW_OFFLINE,
   WORKFLOW_PIPELINE,
-  WORKFLOW_SMOKE,
   fetchAnalysis,
   fetchArtifactJson,
   fetchObservationQueue,
   type ObservationQueue,
+  type RecipeCard,
   fetchReviewBundle,
   fetchRecipe,
-  frameUrl,
-  listAnalyses,
+  listRecipes,
 } from "./api";
 import type { RecipeDraft } from "./results";
 import {
   ReviewBundle,
-  frameState,
   orderFrames,
   summarizeReview,
 } from "./review";
-
-const DEMO_RUN_ID = "run_387662c3eaab";
 
 
 function errorText(err: unknown): string {
@@ -57,51 +51,30 @@ function fmtDate(value: string | undefined): string {
 
 /* ---------------- Landing ---------------- */
 
+function recipeStatusLabel(status: string): string {
+  if (status === "approved") return "Approved";
+  if (status === "needs_changes") return "Needs Review";
+  if (status === "processing") return "Processing";
+  return "Draft";
+}
+
+function recipeLanguageLabel(language: string): string {
+  return language === "es" ? "Español" : "English";
+}
+
 function Landing(props: {
-  onOpen: (runId: string) => void;
   onNewAnalysis: () => void;
+  onOpenRecipe: (recipeId: string) => void;
 }): JSX.Element {
-  const [items, setItems] = useState<AnalysisStatus[] | null>(null);
-  const [stats, setStats] = useState<Record<string, {
-    frames: number; readings: number; abstentions: number;
-  }>>({});
+  const [items, setItems] = useState<RecipeCard[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [heroMissing, setHeroMissing] = useState(false);
-  const [costReports, setCostReports] = useState<Record<string, FirstpassCostReport | null>>({});
-  const [costsSettled, setCostsSettled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    listAnalyses().then((rows) => {
+    listRecipes().then((rows) => {
       if (cancelled) return;
       setItems(rows);
-      void Promise.allSettled(rows.map(async (row) => {
-        const [bundle, report] = await Promise.all([
-          fetchReviewBundle(row.run_id),
-          fetchArtifactJson<FirstpassCostReport>(row.run_id, "firstpass_report.json").catch(() => null),
-        ]);
-        return { run_id: row.run_id, bundle, report };
-      })).then((results) => {
-        if (cancelled) return;
-        const next: Record<string, {
-          frames: number; readings: number; abstentions: number;
-        }> = {};
-        const reports: Record<string, FirstpassCostReport | null> = {};
-        for (const row of rows) reports[row.run_id] = null;
-        for (const result of results) {
-          if (result.status !== "fulfilled") continue;
-          reports[result.value.run_id] = result.value.report;
-          const counts = summarizeReview(result.value.bundle);
-          next[result.value.run_id] = {
-            frames: counts.frames,
-            readings: counts.numeric,
-            abstentions: counts.abstained,
-          };
-        }
-        setStats(next);
-        setCostReports(reports);
-        setCostsSettled(true);
-      });
     }).catch((err: unknown) => {
       if (!cancelled) setError(errorText(err));
     });
@@ -110,21 +83,8 @@ function Landing(props: {
 
   if (error) return <p className="error">{error}</p>;
   if (items === null) {
-    return <p className="muted">Loading analyses…</p>;
+    return <p className="muted">Loading recipes…</p>;
   }
-  const featured = items.find((item) => item.run_id === DEMO_RUN_ID)
-    ?? null;
-  const rest = featured
-    ? items.filter((item) => item.run_id !== DEMO_RUN_ID) : items;
-  const isTechnical = (item: AnalysisStatus): boolean =>
-    item.workflow === WORKFLOW_SMOKE
-    || (stats[item.run_id] !== undefined
-      && stats[item.run_id].frames === 0);
-  const library = rest.filter((item) => !isTechnical(item));
-  const featuredStats = featured ? stats[featured.run_id] : undefined;
-  const scrollToId = (id: string): void => {
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
-  };
   return (
     <div className="landing">
       <section className="hero">
@@ -144,15 +104,6 @@ function Landing(props: {
             >
               Create my recipe
             </button>
-            {library.length > 0 && (
-              <button
-                type="button"
-                className="btn-ghost btn-lg"
-                onClick={() => scrollToId("analyses")}
-              >
-                View your analyses
-              </button>
-            )}
           </div>
           <ul className="capabilities">
             <li>
@@ -196,67 +147,31 @@ function Landing(props: {
             Create my first recipe
           </button>
         </section>
-      ) : (featured ? (
-        <section id="analyses" aria-label="Your analyses">
-          <div className="section-head">
-            <h2>Featured demonstration</h2>
-          </div>
-          <button
-            type="button"
-            className="demo-card"
-            onClick={() => props.onOpen(featured.run_id)}
-          >
-            <span className="pill pill-demo">Demonstration case</span>
-            <strong className="run-title">
-              {displaySourceName(featured)}
-            </strong>
-            <span className="muted small">
-              {fmtDate(featured.created_at)}
-            </span>
-            <span className="stat-row">
-              <span>{featuredStats?.frames ?? "—"} frames</span>
-              <span>{featuredStats?.readings ?? "—"} readings</span>
-              <span>
-                {featuredStats?.abstentions ?? "—"} abstentions
-              </span>
-            </span>
-            <span className="muted small">
-              {formatEstimatedCost(costReports[featured.run_id], costsSettled)}
-            </span>
-            <span className="btn-primary">Review recipe</span>
-          </button>
-        </section>
-      ) : null)}
-      {library.length > 0 && (
-        <section aria-label="Your analyses">
-          <h2>Your analyses</h2>
-          <p className="muted small">Costs are estimates from recorded usage and configured rates, not provider billing.</p>
+      ) : (
+        <section aria-label="Your recipes">
+          <h2>Your Recipes</h2>
           <ul className="run-list">
-            {library.map((item) => {
-              const row = stats[item.run_id];
-              return (
-                <li key={item.run_id}>
-                  <button
-                    type="button"
-                    onClick={() => props.onOpen(item.run_id)}
-                  >
-                    <strong>{displaySourceName(item)}</strong>
-                    <span className="muted small">
-                      {fmtDate(item.created_at)}
-                    </span>
-                    <span className="stat-row small">
-                      <span>{row?.frames ?? "—"} frames</span>
-                      <span>{row?.readings ?? "—"} readings</span>
-                      <span>{row?.abstentions ?? "—"} abstentions</span>
-                    </span>
-                    <span className="muted small">
-                      {formatEstimatedCost(costReports[item.run_id], costsSettled)}
-                    </span>
-                    <span className="btn-ghost">Review recipe</span>
-                  </button>
-                </li>
-              );
-            })}
+            {items.map((item) => (
+              <li key={item.recipe_id}>
+                <button
+                  type="button"
+                  onClick={() => props.onOpenRecipe(item.recipe_id)}
+                >
+                  <strong>{item.name}</strong>
+                  <span className="muted small">
+                    {recipeLanguageLabel(item.language)}
+                    {" · "}
+                    {fmtDate(item.updated_at ?? undefined)}
+                  </span>
+                  <span className="stat-row small">
+                    <span>{item.ingredients} ingredients</span>
+                    <span>{item.steps} steps</span>
+                    <span>{recipeStatusLabel(item.status)}</span>
+                  </span>
+                  <span className="btn-ghost">View Recipe</span>
+                </button>
+              </li>
+            ))}
           </ul>
         </section>
       )}
@@ -502,11 +417,17 @@ function Workspace(props: {
 export default function ReviewApp(props: {
   initialRunId?: string | null;
   onNewAnalysis: () => void;
+  onOpenRecipe: (recipeId: string) => void;
 }): JSX.Element {
   const [selected, setSelected] = useState<string | null>(
     props.initialRunId ?? null);
   if (selected === null) {
-    return <Landing onOpen={setSelected} onNewAnalysis={props.onNewAnalysis} />;
+    return (
+      <Landing
+        onNewAnalysis={props.onNewAnalysis}
+        onOpenRecipe={props.onOpenRecipe}
+      />
+    );
   }
   return <Workspace runId={selected} onBack={() => setSelected(null)} />;
 }

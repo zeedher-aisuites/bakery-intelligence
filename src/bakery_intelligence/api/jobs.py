@@ -51,12 +51,18 @@ WORKFLOW_VIDEO_PIPELINE_OFFLINE = "video_pipeline_offline"
 # requires a validated authorization grant; merely starting the
 # API or worker can never dispatch it.
 WORKFLOW_VIDEO_PIPELINE_META = "video_pipeline_meta"
+# Multimodal pipeline: Meta Spark 1.3 frames + global video,
+# Baseten Spark Open segments + fusion, Meta Voice ASR, and a
+# model-adapter evidence-validation stage (Spark 1.3 fills the
+# Glimmer role until Glimmer hosting is available).
+WORKFLOW_VIDEO_PIPELINE_MULTIMODAL = "video_pipeline_multimodal"
 
 SUPPORTED_WORKFLOWS = (
     WORKFLOW_STORAGE_SMOKE,
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_VIDEO_RECONSTRUCT,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
     WORKFLOW_VIDEO_PIPELINE_META,
 )
 
@@ -71,6 +77,7 @@ class RetryError(ValueError):
 
 BILLABLE_WORKFLOWS: frozenset[str] = frozenset({
     WORKFLOW_VIDEO_PIPELINE_META,
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
 })
 
 MAX_RETRY_ATTEMPTS = 3
@@ -164,7 +171,7 @@ class JobService:
             raise UnknownWorkflowError(
                 f"Unsupported workflow: {workflow!r}.")
         grant_json: str | None = None
-        if workflow == WORKFLOW_VIDEO_PIPELINE_META:
+        if workflow in BILLABLE_WORKFLOWS:
             if grant is None:
                 raise GrantError(
                     f"Workflow {workflow!r} requires an "

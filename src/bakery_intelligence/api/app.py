@@ -38,7 +38,7 @@ from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from bakery_intelligence.api.authorization import GrantError
@@ -65,8 +65,10 @@ from bakery_intelligence.api.jobs import (
     RetryError,
     JobService,
     UnknownWorkflowError,
+    utc_now_iso,
     WORKFLOW_STORAGE_SMOKE,
     WORKFLOW_VIDEO_PIPELINE_META,
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
 )
 from bakery_intelligence.api.review import (
@@ -76,6 +78,37 @@ from bakery_intelligence.api.review import (
     read_frame_bytes,
     read_reviews,
     save_review,
+)
+from bakery_intelligence.api.fusion_review import (
+    FusionReviewError,
+    known_targets,
+    read_decisions,
+    read_fusion_draft,
+    review_video_path,
+    save_decision,
+    validate_fusion_run,
+)
+from bakery_intelligence.api.recipe_editor import (
+    RecipeEditorError,
+    create_record,
+    list_recipes,
+    merged_recipe,
+    recipe_dir,
+    read_record,
+    save_edits,
+    set_status,
+    touch_record,
+)
+from bakery_intelligence.phase2c import agents, media, prompts
+from bakery_intelligence.phase2c.clients import (
+    BudgetLedger,
+    MetaResponsesClient,
+)
+from bakery_intelligence.recipe_export import revision as revision_mod
+from bakery_intelligence.recipe_export import proposal as proposal_mod
+from bakery_intelligence.api.multimodal import (
+    BasetenClient,
+    run_revision_stage,
 )
 from bakery_intelligence.api.storage import (
     InvalidObjectIdError,
@@ -216,6 +249,72 @@ class ReviewSubmission(BaseModel):
     reviewer: str | None = None
 
 
+class FusionDecisionSubmission(BaseModel):
+    """One chef decision on a fusion draft node."""
+
+    target_type: str
+    target_id: str
+    action: str
+    value: dict[str, Any] | None = None
+    reviewer: str
+    notes: str | None = None
+
+
+class RecipeIngredientEdit(BaseModel):
+    """One ingredient row edit, keyed by snapshot position."""
+
+    index: int
+    name: str | None = None
+    quantity: float | int | None = None
+    unit: str | None = None
+
+
+class RecipeMethodEdit(BaseModel):
+    """One instruction text edit, keyed by step number."""
+
+    number: int
+    instruction: str | None = None
+
+
+class RecipeSaveSubmission(BaseModel):
+    """Chef edits over the frozen proposed snapshot."""
+
+    ingredients: list[RecipeIngredientEdit] = []
+    method: list[RecipeMethodEdit] = []
+
+
+class RecipeStatusSubmission(BaseModel):
+    """Approval state transition with an optional note."""
+
+    status: str
+    note: str | None = None
+
+
+class RecipeCreateSubmission(BaseModel):
+    """Name a recipe and choose its language before processing."""
+
+    name: str
+    language: str = "en"
+    source_run_id: str | None = None
+
+
+class SuggestionSelection(BaseModel):
+    """One chef-selected improvement suggestion with optional input."""
+
+    id: str
+    selected: bool = False
+    value: str | None = None
+
+
+class RecipeReviseSubmission(BaseModel):
+    """Explicit chef request for a new AI recipe version."""
+
+    instructions: str
+    suggestions: list[SuggestionSelection] = []
+    allow_ingredient_changes: bool = False
+    confirmed: bool = False
+
+
 def sanitize_filename(filename: str | None) -> str:
     """Derive a safe storage object id from a client filename."""
     stem = (filename or "upload").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
@@ -233,6 +332,77 @@ def default_storage_dir() -> Path:
         if (parent / "pyproject.toml").is_file():
             return parent / DEFAULT_STORAGE_DIRNAME
     return Path.cwd() / DEFAULT_STORAGE_DIRNAME
+
+
+def _revision_evidence(root: Path,
+                     run_id: str | None) -> dict[str, Any]:
+    """Capped multimodal evidence for a revision request.
+
+    Reuses persisted run artifacts; never reruns inference.
+    Missing runs or pre-multimodal artifacts yield an empty
+    mapping instead of failing the revision.
+    """
+    if not run_id:
+        return {}
+    artifacts = root / "runs" / run_id / "artifacts"
+    if not artifacts.is_dir():
+        return {}
+
+    def _optional(name: str) -> dict[str, Any]:
+        path = artifacts / name
+        if not path.is_file():
+            return {}
+        try:
+            stored = media.read_json(path)
+        except ValueError:
+            return {}
+        return stored if isinstance(stored, dict) else {}
+
+    evidence: dict[str, Any] = {}
+    merged = _optional("multimodal_merged.json")
+    if merged:
+        evidence["merged"] = {
+            "readings_total": merged.get("readings_total"),
+            "segment_count": merged.get("segment_count"),
+            "transcript_turns": merged.get(
+                "transcript_turns"),
+            "unresolved": merged.get("unresolved") or [],
+            "items": (merged.get("items") or [])[:120],
+        }
+    validation = _optional("multimodal_validation.json")
+    if validation:
+        evidence["validation"] = {
+            "model": validation.get("model"),
+            "provider": validation.get("provider"),
+            "result": validation.get("result") or {},
+        }
+    index = _optional("multimodal_segments_index.json")
+    if index:
+        evidence["segments"] = {
+            "count": index.get("count"),
+            "model": index.get("model"),
+        }
+    try:
+        text = json.dumps(evidence)
+    except (TypeError, ValueError):
+        return {}
+    if len(text) > 20000:
+        items = evidence.get("merged", {}).get("items")
+        if isinstance(items, list):
+            evidence["merged"]["items"] = items[:40]
+            text = json.dumps(evidence)
+    if len(text) > 20000:
+        evidence.pop("merged", None)
+    return evidence
+
+
+def _next_version_id(root: Path, parent_id: str) -> str:
+    """First free sibling id: <parent>_r1, <parent>_r2, ..."""
+    base = root / "recipes"
+    suffix = 1
+    while (base / f"{parent_id}_r{suffix}").exists():
+        suffix += 1
+    return f"{parent_id}_r{suffix}"
 
 
 def build_app(storage: StorageBackend | None = None,
@@ -294,7 +464,8 @@ def build_app(storage: StorageBackend | None = None,
         content = await file.read()
         cap = (effective_video_max_bytes()
                if workflow in (WORKFLOW_VIDEO_PIPELINE_OFFLINE,
-                               WORKFLOW_VIDEO_PIPELINE_META)
+                               WORKFLOW_VIDEO_PIPELINE_META,
+                               WORKFLOW_VIDEO_PIPELINE_MULTIMODAL)
                else MAX_UPLOAD_BYTES)
         if len(content) > cap:
             raise HTTPException(
@@ -851,11 +1022,13 @@ def build_app(storage: StorageBackend | None = None,
                     "created."))
         if request.workflow not in (
                 WORKFLOW_VIDEO_PIPELINE_OFFLINE,
-                WORKFLOW_VIDEO_PIPELINE_META):
+                WORKFLOW_VIDEO_PIPELINE_META,
+                WORKFLOW_VIDEO_PIPELINE_MULTIMODAL):
             raise HTTPException(
                 status_code=422,
-                detail=("Uploads start either the offline preview "
-                        "or the Meta pipeline workflow."))
+                detail=("Uploads start the offline preview, the "
+                        "Meta pipeline, or the multimodal "
+                        "pipeline workflow."))
         try:
             record = service.submit(
                 request.workflow, source_object_id=object_id,
@@ -930,5 +1103,501 @@ def build_app(storage: StorageBackend | None = None,
             "error": record.error,
             "updated_at": updated,
         }
+
+    @app.get("/api/fusion/drafts/{run_name}")
+    def get_fusion_draft(run_name: str) -> dict[str, Any]:
+        root = _review_root()
+        try:
+            return read_fusion_draft(root, run_name)
+        except FusionReviewError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @app.get("/api/fusion/drafts/{run_name}/video")
+    def get_fusion_video(run_name: str) -> FileResponse:
+        return _fusion_video(run_name, None)
+
+    @app.get("/api/fusion/drafts/{run_name}/video/{clip_id}")
+    def get_fusion_clip_video(run_name: str,
+                              clip_id: str) -> FileResponse:
+        return _fusion_video(run_name, clip_id)
+
+    def _fusion_video(run_name: str,
+                      clip_id: str | None) -> FileResponse:
+        root = _review_root()
+        try:
+            validate_fusion_run(run_name)
+        except FusionReviewError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        path = review_video_path(root, run_name, clip_id)
+        if path is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Review video is not available on "
+                       "this host.")
+        return FileResponse(path, media_type="video/mp4",
+                            filename=path.name)
+
+    @app.get("/api/fusion/drafts/{run_name}/reviews")
+    def get_fusion_reviews(run_name: str) -> dict[str, Any]:
+        root = _review_root()
+        try:
+            stored = read_decisions(root, run_name)
+        except FusionReviewError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        ordered = [stored["decisions"][key]
+                   for key in sorted(stored["decisions"])]
+        return {
+            "run_name": run_name,
+            "schema_version": stored["schema_version"],
+            "decisions": ordered,
+        }
+
+    @app.post("/api/fusion/drafts/{run_name}/reviews",
+              status_code=200)
+    def save_fusion_review(
+            run_name: str,
+            submission: FusionDecisionSubmission) -> dict[str, Any]:
+        root = _review_root()
+        try:
+            payload = read_fusion_draft(root, run_name)
+        except FusionReviewError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        try:
+            return save_decision(
+                root, run_name, submission.target_type,
+                submission.target_id, submission.action,
+                submission.value, submission.reviewer,
+                submission.notes,
+                known_targets(payload["draft"]))
+        except FusionReviewError as exc:
+            message = str(exc)
+            status = 404 if message.startswith("Unknown") \
+                else 422
+            raise HTTPException(status_code=status, detail=message)
+
+    @app.get("/api/recipes")
+    def list_recipe_cards() -> dict[str, Any]:
+        return {"recipes": list_recipes(_review_root())}
+
+    @app.post("/api/recipes", status_code=201)
+    def create_recipe(
+            submission: RecipeCreateSubmission) -> dict[str, Any]:
+        root = _review_root()
+        try:
+            record = create_record(
+                root, submission.name, submission.language,
+                source_run_id=submission.source_run_id)
+        except RecipeEditorError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return record
+
+    @app.post("/api/recipes/{recipe_id}/revise", status_code=201)
+    def revise_recipe(recipe_id: str,
+                      submission: RecipeReviseSubmission
+                      ) -> dict[str, Any]:
+        """One bounded AI revision producing a new version."""
+        if not submission.confirmed:
+            raise HTTPException(
+                status_code=422,
+                detail="Revision requires explicit confirmation.")
+        instructions = (submission.instructions or "").strip()
+        if not instructions:
+            raise HTTPException(
+                status_code=422,
+                detail="Revision instructions must not be empty.")
+        if len(instructions) > 2000:
+            raise HTTPException(
+                status_code=422,
+                detail="Revision instructions exceed 2000 characters.")
+        root = _review_root()
+        try:
+            recipe = merged_recipe(root, recipe_id)
+        except RecipeEditorError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        record = read_record(root, recipe_id) or {}
+        language = record.get("language") or "en"
+        selected = [{
+            "id": item.id,
+            "value": (item.value or "").strip() or None,
+        } for item in submission.suggestions if item.selected]
+        unresolved = list(recipe.get("open_questions") or [])
+        for item in recipe.get("technical_limitations") or []:
+            if isinstance(item, str) and item.strip():
+                unresolved.append(item.strip())
+        bundle = revision_mod.revision_bundle(
+            recipe, instructions, selected, language,
+            submission.allow_ingredient_changes,
+            record.get("name") or recipe.get("title") or recipe_id,
+            unresolved_questions=unresolved,
+            evidence=_revision_evidence(
+                root, record.get("source_run_id")))
+        new_id = _next_version_id(root, recipe_id)
+        out_dir = recipe_dir(root, new_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ledger = BudgetLedger.load(
+            root / "phase2c" / "ledger.json")
+        try:
+            client = BasetenClient()
+        except Exception as exc:  # noqa: BLE001 - surfaced
+            raise HTTPException(status_code=502,
+                                detail=str(exc)[:300])
+        try:
+            stored, _call = run_revision_stage(
+                client, bundle, out_dir)
+        except Exception as exc:  # noqa: BLE001 - surfaced
+            raise HTTPException(
+                status_code=502,
+                detail=f"Revision model call failed: "
+                       f"{str(exc)[:300]}")
+        try:
+            revised = revision_mod.validate_revision(
+                recipe, stored.get("parsed"),
+                submission.allow_ingredient_changes)
+        except revision_mod.RevisionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        from datetime import datetime, timezone
+
+        generated_at = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        snapshot = revision_mod.assemble_version(recipe, revised, {
+            "recipe_id": new_id,
+            "parent_id": recipe_id,
+            "generated_at": generated_at,
+            "language": language,
+            "instructions": instructions,
+            "suggestions": selected,
+            "allow_ingredient_changes":
+            submission.allow_ingredient_changes,
+            "provider": stored.get("provider"),
+            "model": stored.get("model"),
+            "request_id": stored.get("request_id"),
+            "actual_usd": None,
+        })
+        media.write_json(out_dir / "snapshot.json", snapshot)
+        create_record(root, record.get("name")
+                      or recipe.get("title") or new_id,
+                      language, source_run_id=record.get(
+                          "source_run_id"), parent_version=recipe_id,
+                      recipe_id=new_id)
+        ledger.record({
+            "label": f"revision/{recipe_id}/{new_id}",
+            "provider": stored.get("provider"),
+            "model": stored.get("model"),
+            "estimate_usd": None,
+            "actual_usd": None,
+            "request_id": stored.get("request_id"),
+        })
+        return {"recipe_id": new_id,
+                "parent_version": recipe_id,
+                "provider": stored.get("provider"),
+                "model": stored.get("model"),
+                "request_id": stored.get("request_id"),
+                "actual_usd": None,
+                "recipe": merged_recipe(root, new_id)}
+
+    @app.post("/api/recipes/{recipe_id}/build", status_code=200)
+    def build_recipe(recipe_id: str) -> dict[str, Any]:
+        """Build the first snapshot from the linked analysis.
+
+        Idempotent: an existing snapshot returns ready without
+        new inference. One bounded proposal call otherwise.
+        """
+        from datetime import datetime, timezone
+
+        root = _review_root()
+        try:
+            record = read_record(root, recipe_id)
+        except RecipeEditorError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        if record is None:
+            raise HTTPException(status_code=404,
+                                detail="Unknown recipe.")
+        out_dir = recipe_dir(root, recipe_id)
+        if (out_dir / "snapshot.json").is_file():
+            return {"status": "ready",
+                    "recipe": merged_recipe(root, recipe_id)}
+        run_id = record.get("source_run_id")
+        if not run_id:
+            raise HTTPException(
+                status_code=422,
+                detail="Recipe has no linked analysis.")
+        job = service.get(run_id)
+        if job is None:
+            raise HTTPException(status_code=404,
+                                detail="Unknown analysis.")
+        if job.status == STATUS_FAILED:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Analysis failed: "
+                       f"{job.error or 'unknown error'}.")
+        if job.status != STATUS_COMPLETED:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Analysis is {job.status}; the recipe "
+                       f"builds after analysis completes.")
+        lock_path = out_dir / "building.lock"
+        if lock_path.is_file():
+            try:
+                lock = json.loads(lock_path.read_text(
+                    encoding="utf-8"))
+                started = datetime.fromisoformat(
+                    lock.get("started_at", ""))
+                age = (datetime.now(timezone.utc)
+                       - started).total_seconds()
+            except (OSError, ValueError):
+                age = 1e12
+            if age < 600:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Recipe build already in progress.")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for stale in ("build_error.json", "unavailable.json"):
+            (out_dir / stale).unlink(missing_ok=True)
+        media.write_json(lock_path, {
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        })
+        try:
+            run_dir = root / "runs" / run_id
+            try:
+                bundle = proposal_mod.build_evidence_bundle(
+                    run_dir, record.get("name") or recipe_id,
+                    record.get("language") or "en")
+            except proposal_mod.ProposalError as exc:
+                media.write_json(out_dir / "build_error.json", {
+                    "at": utc_now_iso(), "stage": "bundle",
+                    "error": str(exc)[:300],
+                })
+                raise HTTPException(status_code=502,
+                                    detail=str(exc)[:300])
+            fusion_record: dict[str, Any] = {}
+            fusion_path = (run_dir / "artifacts"
+                           / "multimodal_fusion_recipe.json")
+            if fusion_path.is_file():
+                fusion_record = media.read_json(fusion_path) or {}
+            builder = "auto-proposal/1"
+            provider = "meta"
+            model: str | None = None
+            prompt_version: str | None = None
+            request_id: str | None = None
+            actual_usd: float | None = None
+            parsed: dict[str, Any] | None = None
+            if isinstance(fusion_record.get("result"), dict):
+                # Multimodal run: reuse the Baseten fusion draft
+                # with identical validation. No second model call.
+                builder = "multimodal-fusion/1"
+                provider = str(fusion_record.get("provider")
+                               or "baseten")
+                model = fusion_record.get("model")
+                prompt_version = fusion_record.get(
+                    "prompt_version")
+                request_id = fusion_record.get("request_id")
+                try:
+                    parsed = proposal_mod.validate_proposal(
+                        bundle, fusion_record["result"])
+                except proposal_mod.ProposalError as exc:
+                    media.write_json(
+                        out_dir / "build_error.json", {
+                            "at": utc_now_iso(),
+                            "stage": "fusion_validation",
+                            "error": str(exc)[:300],
+                            "request_id": request_id,
+                        })
+                    raise HTTPException(
+                        status_code=422, detail=str(exc)[:300])
+            else:
+                ledger = BudgetLedger.load(
+                    root / "phase2c" / "ledger.json")
+                try:
+                    result = agents.run_text_agent(
+                        MetaResponsesClient(), ledger,
+                        prompts.RECIPE_PROPOSAL, "proposal",
+                        "session", bundle, out_dir,
+                        "proposal_raw.json",
+                        proposal_mod.ESTIMATE_USD)
+                except Exception as exc:  # noqa: BLE001
+                    media.write_json(
+                        out_dir / "build_error.json", {
+                            "at": utc_now_iso(),
+                            "stage": "proposal",
+                            "error": str(exc)[:300],
+                        })
+                    raise HTTPException(
+                        status_code=502, detail=str(exc)[:300])
+                if result.status != "ok":
+                    media.write_json(
+                        out_dir / "build_error.json", {
+                            "at": utc_now_iso(),
+                            "stage": "proposal",
+                            "error": (result.error
+                                      or "unknown error")[:300],
+                            "request_id": result.request_id,
+                        })
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Proposal model call failed: "
+                               f"{result.error or 'unknown error'}")
+                stored = media.read_json(
+                    out_dir / "proposal_raw.json") or {}
+                request_id = result.request_id
+                actual_usd = result.actual_usd
+                try:
+                    parsed = proposal_mod.validate_proposal(
+                        bundle, stored.get("parsed"))
+                except proposal_mod.ProposalError as exc:
+                    media.write_json(
+                        out_dir / "build_error.json", {
+                            "at": utc_now_iso(),
+                            "stage": "validation",
+                            "error": str(exc)[:300],
+                            "request_id": result.request_id,
+                        })
+                    raise HTTPException(
+                        status_code=422, detail=str(exc)[:300])
+            assert parsed is not None
+            if not parsed.get("meaningful"):
+                reason = str(parsed.get("reason") or "")[:500]
+                media.write_json(out_dir / "unavailable.json", {
+                    "at": utc_now_iso(), "reason": reason,
+                    "request_id": request_id,
+                })
+                if builder == "auto-proposal/1":
+                    ledger.record({
+                        "label": f"proposal/{run_id}/{recipe_id}",
+                        "estimate_usd":
+                        proposal_mod.ESTIMATE_USD,
+                        "actual_usd": actual_usd,
+                        "request_id": request_id,
+                    })
+                raise HTTPException(status_code=422, detail=reason)
+            generated_at = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            snapshot = proposal_mod.assemble_snapshot(
+                bundle, parsed, {
+                    "recipe_id": recipe_id,
+                    "run_id": run_id,
+                    "generated_at": generated_at,
+                    "request_id": request_id,
+                    "actual_usd": actual_usd,
+                    "builder": builder,
+                    "provider": provider,
+                    "model": model,
+                    "prompt_version": prompt_version,
+                })
+            media.write_json(out_dir / "snapshot.json", snapshot)
+            sources = {}
+            for name in ("pipeline_summary.json",
+                         "measurements.json", "recipe_draft.json",
+                         "weighing_event.json",
+                         "multimodal_fusion_recipe.json",
+                         "multimodal_cost_report.json"):
+                path = run_dir / "artifacts" / name
+                if path.is_file():
+                    sources[name] = hashlib.sha256(
+                        path.read_bytes()).hexdigest()
+            media.write_json(out_dir / "manifest.json", {
+                "snapshot_id": recipe_id,
+                "snapshot_version":
+                proposal_mod.SNAPSHOT_VERSION,
+                "run_id": run_id,
+                "generated_at": generated_at,
+                "sources": sources,
+                "proposal_request_id": request_id,
+                "proposal_actual_usd": actual_usd,
+                "proposal_builder": builder,
+            })
+            touch_record(root, recipe_id, has_snapshot=True)
+            if builder == "auto-proposal/1":
+                ledger.record({
+                    "label": f"proposal/{run_id}/{recipe_id}",
+                    "estimate_usd": proposal_mod.ESTIMATE_USD,
+                    "actual_usd": actual_usd,
+                    "request_id": request_id,
+                })
+            return {"status": "ready",
+                    "recipe": merged_recipe(root, recipe_id)}
+        finally:
+            lock_path.unlink(missing_ok=True)
+
+    @app.get("/api/recipes/{recipe_id}")
+    def get_recipe(recipe_id: str) -> dict[str, Any]:
+        root = _review_root()
+        try:
+            return merged_recipe(root, recipe_id)
+        except RecipeEditorError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @app.put("/api/recipes/{recipe_id}", status_code=200)
+    def save_recipe(recipe_id: str,
+                    submission: RecipeSaveSubmission,
+                    ) -> dict[str, Any]:
+        root = _review_root()
+        try:
+            return save_edits(
+                root, recipe_id,
+                [edit.model_dump(exclude_unset=True)
+                 for edit in submission.ingredients],
+                [edit.model_dump(exclude_unset=True)
+                 for edit in submission.method])
+        except RecipeEditorError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @app.post("/api/recipes/{recipe_id}/status", status_code=200)
+    def update_recipe_status(
+            recipe_id: str,
+            submission: RecipeStatusSubmission) -> dict[str, Any]:
+        root = _review_root()
+        try:
+            return set_status(root, recipe_id, submission.status,
+                              submission.note)
+        except RecipeEditorError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @app.get("/api/recipes/{recipe_id}/export.pdf")
+    def export_recipe_pdf(recipe_id: str) -> Response:
+        from bakery_intelligence.recipe_export.pdf import build_pdf
+
+        root = _review_root()
+        try:
+            recipe = merged_recipe(root, recipe_id)
+        except RecipeEditorError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        data = build_pdf(recipe)
+        return Response(
+            content=data, media_type="application/pdf",
+            headers={"Content-Disposition":
+                     f'attachment; filename="{recipe_id}.pdf"'})
+
+    @app.get("/api/recipes/{recipe_id}/export.docx")
+    def export_recipe_docx(recipe_id: str) -> Response:
+        from bakery_intelligence.recipe_export.docx import build_docx
+
+        root = _review_root()
+        try:
+            recipe = merged_recipe(root, recipe_id)
+        except RecipeEditorError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        data = build_docx(recipe)
+        return Response(
+            content=data,
+            media_type="application/vnd.openxmlformats-"
+                       "officedocument.wordprocessingml.document",
+            headers={"Content-Disposition":
+                     f'attachment; filename="{recipe_id}.docx"'})
 
     return app

@@ -209,7 +209,7 @@ test("failed free jobs can retry safely without repeating billing", async () => 
 
 test("paid and invalid failures offer no Retry button", async () => {
   const metaFailed = {
-    ...queuedJob, status: "failed", workflow: "video_pipeline_meta",
+    ...queuedJob, status: "failed", workflow: "video_pipeline_multimodal",
     error: "boom", error_category: "processing", attempts: 1,
   };
   const invalidFailed = {

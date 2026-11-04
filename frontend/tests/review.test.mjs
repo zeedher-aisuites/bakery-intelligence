@@ -63,7 +63,7 @@ function frame(overrides = {}) {
 function bundle(frames) {
   return {
     run_id: "run_0123456789ab",
-    workflow: "video_pipeline_meta",
+    workflow: "video_pipeline_multimodal",
     status: "completed",
     source_object_id: "clip.mp4",
     source_sha256: "def",

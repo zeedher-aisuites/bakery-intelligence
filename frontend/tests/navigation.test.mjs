@@ -34,6 +34,11 @@ const { JSDOM } = require("jsdom");
 function stubFetch() {
   globalThis.fetch = async (url) => {
     const text = String(url);
+    if (text.includes("/api/recipes")) {
+      return {
+        ok: true, status: 200, json: async () => ({ recipes: [] }),
+      };
+    }
     if (text.includes("/api/analyses")) {
       return { ok: true, status: 200, json: async () => [] };
     }
@@ -125,7 +130,7 @@ test("empty-state CTA navigates to New Analysis on click", async () => {
 test("header control navigates to New Analysis on click", async () => {
   const { act, container, cleanup } = await renderApp();
   try {
-    await clickButton(act, container, "+ New analysis");
+    await clickButton(act, container, "New Recipe");
     assert.ok(showsNewAnalysis(container),
       "New Analysis view is not displayed after header navigation click");
   } finally {

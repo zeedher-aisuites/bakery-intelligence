@@ -1,10 +1,16 @@
 import type { ReviewAnnotation, ReviewBundle } from "./review";
+import type {
+  FusionAction,
+  FusionDecision,
+  FusionDraft,
+  FusionTargetType,
+} from "./fusion";
 
 export const API_BASE =
   import.meta.env?.VITE_API_BASE ?? "http://localhost:8000";
 
 export const WORKFLOW_SMOKE = "storage_smoke";
-export const WORKFLOW_META = "video_pipeline_meta";
+export const WORKFLOW_META = "video_pipeline_multimodal";
 export const WORKFLOW_OFFLINE = "offline_reconstruct";
 export const WORKFLOW_PIPELINE = "video_pipeline_offline";
 
@@ -463,4 +469,266 @@ export async function saveReview(
   });
   if (!response.ok) throw new ApiError(response.status, await parseError(response));
   return (await response.json()) as ReviewAnnotation;
+}
+
+export interface FusionBundle {
+  run_name: string;
+  draft: FusionDraft;
+  evaluation: Record<string, unknown>;
+}
+
+export async function fetchFusionDraft(
+  runName: string,
+): Promise<FusionBundle> {
+  const response = await fetch(`${API_BASE}/api/fusion/drafts/${runName}`);
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as FusionBundle;
+}
+
+export function fusionVideoUrl(
+  runName: string,
+  clipId?: string | null,
+): string {
+  const base = `${API_BASE}/api/fusion/drafts/${runName}/video`;
+  return clipId ? `${base}/${clipId}` : base;
+}
+
+export async function fetchFusionDecisions(
+  runName: string,
+): Promise<FusionDecision[]> {
+  const response = await fetch(`${API_BASE}/api/fusion/drafts/${runName}/reviews`);
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  const payload = (await response.json()) as {
+    decisions: FusionDecision[];
+  };
+  return payload.decisions;
+}
+
+export async function saveFusionDecision(
+  runName: string,
+  input: {
+    target_type: FusionTargetType;
+    target_id: string;
+    action: FusionAction;
+    value?: Record<string, unknown> | null;
+    reviewer: string;
+    notes?: string | null;
+  },
+): Promise<FusionDecision> {
+  const response = await fetch(`${API_BASE}/api/fusion/drafts/${runName}/reviews`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as FusionDecision;
+}
+
+export interface ProposedIngredient {
+  name: string;
+  quantity: number | null;
+  unit: string | null;
+  quantity_status: string;
+  quantity_basis: string | null;
+  review_status: string[];
+  group_ids: string[];
+  note: string | null;
+  evidence?: Array<{ kind?: string | null }>;
+  draft_adjustment: {
+    displayed_value: number | null;
+    draft_value: number | null;
+    reason: string;
+  } | null;
+  chef_edited: boolean;
+  original: Record<string, unknown> | null;
+}
+
+export interface ProposedMethodStep {
+  number: number;
+  clip_id: string | null;
+  interval: string;
+  instruction: string;
+  step_group_ids: string[];
+  review_status: string[];
+  caveats: string[];
+  ai_guidance: { text: string; provenance: string } | null;
+  chef_edited: boolean;
+  original: Record<string, unknown> | null;
+}
+
+export interface ImprovementSuggestion {
+  id: string;
+  label_en?: string;
+  label_es?: string;
+  hint_en?: string;
+  hint_es?: string;
+  placeholder_en?: string;
+  placeholder_es?: string;
+  label?: string;
+  hint?: string;
+  placeholder?: string;
+}
+
+export interface ProposedRecipe {
+  snapshot_version: string;
+  snapshot_id: string;
+  run_name: string;
+  recipe_id?: string;
+  recipe_name?: string | null;
+  language?: string;
+  parent_version?: string | null;
+  parent_name?: string | null;
+  generated_at: string;
+  title: string;
+  title_basis: string;
+  recipe_status: string;
+  status_note: string | null;
+  status_updated_at: string | null;
+  last_saved_at: string | null;
+  review_summary: Record<string, unknown>;
+  ingredients: ProposedIngredient[];
+  method: ProposedMethodStep[];
+  review_flags: Array<Record<string, unknown>>;
+  completion_open_items: string[];
+  limitations: string[];
+  improvement_suggestions?: ImprovementSuggestion[];
+}
+
+export interface ProposedIngredientEdit {
+  index: number;
+  name?: string;
+  quantity?: number | null;
+  unit?: string | null;
+}
+
+export interface ProposedMethodEdit {
+  number: number;
+  instruction?: string;
+}
+
+export async function fetchProposedRecipe(recipeId: string): Promise<ProposedRecipe> {
+  const response = await fetch(`${API_BASE}/api/recipes/${recipeId}`);
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as ProposedRecipe;
+}
+
+export async function saveProposedRecipe(
+  recipeId: string,
+  input: {
+    ingredients: ProposedIngredientEdit[];
+    method: ProposedMethodEdit[];
+  },
+): Promise<ProposedRecipe> {
+  const response = await fetch(`${API_BASE}/api/recipes/${recipeId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as ProposedRecipe;
+}
+
+export async function setProposedRecipeStatus(
+  recipeId: string,
+  input: { status: string; note?: string | null },
+): Promise<ProposedRecipe> {
+  const response = await fetch(`${API_BASE}/api/recipes/${recipeId}/status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as ProposedRecipe;
+}
+
+export function recipeExportUrl(
+  recipeId: string,
+  format: "pdf" | "docx",
+): string {
+  return `${API_BASE}/api/recipes/${recipeId}/export.${format}`;
+}
+
+export interface RecipeCard {
+  recipe_id: string;
+  name: string;
+  language: string;
+  source_run_id: string | null;
+  parent_version: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  ingredients: number;
+  steps: number;
+  has_snapshot: boolean;
+  status: string;
+  build_error?: string | null;
+}
+
+export async function listRecipes(): Promise<RecipeCard[]> {
+  const response = await fetch(`${API_BASE}/api/recipes`);
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  const payload = (await response.json()) as { recipes: RecipeCard[] };
+  return payload.recipes;
+}
+
+export async function createRecipe(input: {
+  name: string;
+  language: string;
+  source_run_id?: string | null;
+}): Promise<{ recipe_id: string }> {
+  const response = await fetch(`${API_BASE}/api/recipes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as { recipe_id: string };
+}
+
+export interface RevisionSuggestion {
+  id: string;
+  selected: boolean;
+  value?: string | null;
+}
+
+export interface RevisionResult {
+  recipe_id: string;
+  parent_version: string;
+  provider: string | null;
+  model: string | null;
+  request_id: string | null;
+  actual_usd: number | null;
+  recipe: ProposedRecipe;
+}
+
+export interface BuildResult {
+  status: string;
+  recipe: ProposedRecipe;
+}
+
+export async function buildRecipe(
+  recipeId: string,
+): Promise<BuildResult> {
+  const response = await fetch(`${API_BASE}/api/recipes/${recipeId}/build`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as BuildResult;
+}
+
+export async function reviseRecipe(
+  recipeId: string,
+  input: {
+    instructions: string;
+    suggestions: RevisionSuggestion[];
+    allow_ingredient_changes: boolean;
+    confirmed: boolean;
+  },
+): Promise<RevisionResult> {
+  const response = await fetch(`${API_BASE}/api/recipes/${recipeId}/revise`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as RevisionResult;
 }

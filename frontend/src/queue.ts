@@ -1,6 +1,6 @@
 // Pure helpers for the persistent Processing Queue.
 
-export const META_WORKFLOW = "video_pipeline_meta";
+export const META_WORKFLOW = "video_pipeline_multimodal";
 export const QUEUE_STATUSES = [
   "queued", "running", "completed", "failed",
 ] as const;

@@ -33,6 +33,7 @@ from bakery_intelligence.api.jobs import (
     WORKFLOW_OFFLINE_RECONSTRUCT,
     WORKFLOW_STORAGE_SMOKE,
     WORKFLOW_VIDEO_PIPELINE_META,
+    WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
     WORKFLOW_VIDEO_PIPELINE_OFFLINE,
     WORKFLOW_VIDEO_RECONSTRUCT,
 )
@@ -545,6 +546,16 @@ def _meta_grant() -> dict[str, Any]:
     return payload
 
 
+def _multimodal_grant() -> dict[str, Any]:
+    payload = _meta_grant()
+    payload["workflow"] = WORKFLOW_VIDEO_PIPELINE_MULTIMODAL
+    payload["confirmation"] = confirmation_sentence(
+        payload["workflow"], payload["model"],
+        payload["max_requests"], payload["token_budget"],
+        payload["max_frames"], payload["operator"])
+    return payload
+
+
 def test_registered_workflows_cannot_trigger_meta(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def explode(*args: Any, **kwargs: Any) -> Any:
@@ -594,6 +605,13 @@ def test_registered_workflows_cannot_trigger_meta(
                               source_object_id="meta.avi",
                               grant=_meta_grant())
 
+    def submit_multimodal() -> Any:
+        storage.store_source("multi.avi", io.BytesIO(video_raw))
+        return service.submit(
+            WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
+            source_object_id="multi.avi",
+            grant=_multimodal_grant())
+
     cases = {
         WORKFLOW_STORAGE_SMOKE: (submit_smoke, STATUS_COMPLETED,
                                  None),
@@ -609,6 +627,9 @@ def test_registered_workflows_cannot_trigger_meta(
         # so the rigged constructor stays untouched.
         WORKFLOW_VIDEO_PIPELINE_META: (submit_meta, STATUS_FAILED,
                                        "CREDENTIAL_MISSING"),
+        WORKFLOW_VIDEO_PIPELINE_MULTIMODAL: (
+            submit_multimodal, STATUS_FAILED,
+            "CREDENTIAL_MISSING"),
     }
     assert set(cases) == set(SUPPORTED_WORKFLOWS)
     for workflow, (setup, expected, error_match) in cases.items():

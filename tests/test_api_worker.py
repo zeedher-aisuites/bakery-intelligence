@@ -167,3 +167,14 @@ def test_worker_billable_stale_job_not_requeued(
     assert final.artifact_ids == []
     assert "Billable workflow" in (final.error or "")
     assert "automatic retry refused" in (final.error or "")
+
+
+def test_worker_entry_loads_local_env(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        worker_module, "_load_local_env",
+        lambda: calls.append("loaded"))
+    assert worker_module.main(
+        ["--once", "--storage-dir", str(tmp_path)]) == 0
+    assert calls == ["loaded"]
