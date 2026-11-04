@@ -11,6 +11,20 @@ Every claim in a draft carries provenance: what was seen in video,
 what was mentioned in audio, what the model estimated, and what a
 chef confirmed. The system never auto-approves a recipe.
 
+## Sample Input Video
+
+The original bakery production video used for real-world
+workflow validation is available as a GitHub Release asset:
+
+[bakery_chef_full_production.mp4](https://github.com/zeedher-aisuites/bakery-intelligence/releases/download/v1.0.0-hackathon/bakery_chef_full_production.mp4)
+
+Download it and upload it through the New Recipe workflow to
+reproduce the end-to-end analysis. The repository
+intentionally does not track the MP4, and the application
+ships without precomputed results. Executing the analysis
+requires supported provider credentials and may incur
+inference costs.
+
 ## Problem
 
 Small bakeries hold their production knowledge in video recordings
