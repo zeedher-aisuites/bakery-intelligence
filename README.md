@@ -1,64 +1,168 @@
 # Bakery Intelligence
 
-Bakery Intelligence converts recorded bakery and pastry preparation
-into **evidence-linked, time-indexed recipe drafts**. A real video
-analysis produces retained frames, timestamped model observations
-with abstentions, provenance records, and an explicit human review
-step. A qualified human must review a draft before any operational
-use; the system never auto-approves a recipe.
+Bakery Intelligence turns real bakery preparation videos into
+**evidence-linked, time-indexed recipe drafts**. A chef uploads a
+cooking video, authorizes metered AI analysis, and receives a
+structured draft — ingredients with quantities, ordered preparation
+steps, supporting timestamps, and explicitly unresolved questions —
+ready for human review, correction, approval, and PDF/DOCX export.
 
-Current MVP scope: upload a real preparation video (up to about
-12 minutes), validate and stage it, run the existing Meta
-Muse Spark 1.3 inference pipeline only after explicit paid
-authorization, track background execution, and inspect, correct,
-and export the evidence in a review workspace. What the pipeline
-produces is an **evidence-backed draft**, not a fully validated
-recipe: ingredient identities, units, tare history, and
-preparation steps remain unknown unless a human verifies them.
+Every claim in a draft carries provenance: what was seen in video,
+what was mentioned in audio, what the model estimated, and what a
+chef confirmed. The system never auto-approves a recipe.
 
-## Architecture
+## Problem
 
-- **FastAPI backend** (`src/bakery_intelligence/api/`): upload
-  staging, durable SQLite job registry, background workers,
-  review persistence, and artifact serving. Storage root is
-  `runs_api/` (git-ignored by design).
-- **Video intake and extraction** (`src/bakery_intelligence/video/`):
-  OpenCV probing, SHA-256 integrity, content-addressed storage,
-  and 1 FPS sampled frame extraction.
-- **Inference pipeline** (`src/bakery_intelligence/api/pipeline.py`,
-  `src/bakery_intelligence/inference/`): offline preview path
-  plus the live Meta Muse Spark path with schema-constrained
-  JSON output, attempt/timeout/byte bounds, a per-request cost
-  ledger, and strict ceiling enforcement.
-- **React + TypeScript frontend** (`frontend/`): landing page,
-  product upload workflow, evidence review workspace,
-  preparation record, and CSV/JSON export.
-- **Local backup utility** (`scripts/backup_data.py`):
-  content-addressed snapshots with manifests and verified
-  restore. See `docs/backup-system.md`.
+Small bakeries hold their production knowledge in video recordings
+and in the heads of experienced staff. Reconstructing a reliable,
+shareable recipe from footage requires watching hours of video,
+transcribing spoken quantities, reading scale displays frame by
+frame, and reconciling contradictions. Bakery Intelligence
+automates the evidence extraction and drafts the recipe, while
+keeping a human in charge of every consequential decision.
+
+## Core capabilities
+
+- Video upload with integrity validation (readability, duration,
+  resolution, SHA-256) and content-addressed local storage.
+- Four selectable FirstPass frame-analysis engines, including a
+  parallel scale-reading engine (10 frames per request, 5
+  concurrent requests).
+- Global native-video understanding, audio transcription with
+  structured speech-claim extraction, and segmented video
+  analysis.
+- Deterministic evidence merge, model-based consistency
+  validation, and Baseten fusion into a structured recipe draft.
+- Chef review workspace: finding-by-finding correction,
+  confirmation, cannot-determine, undo with audit history.
+- Recipe versioning with branching-aware history, per-version
+  display names, and AI-assisted revision that preserves the
+  parent version.
+- PDF and DOCX export from the saved recipe state.
+- Explicit paid-inference authorization with server-validated
+  grants, per-request cost ledger, and strict spending ceilings.
+
+## Architecture overview
+
+```text
+Browser (React) ──► FastAPI backend ──► SQLite job registry
+        │                  │                     │
+        │                  ▼                     ▼
+        │             runs_api/ storage    background worker
+        │             (git-ignored)               │
+        │                                         ▼
+        │              ┌──────────────────────────────────┐
+        │              │ Multimodal pipeline                │
+        │              │  1. Global video (Meta Spark)      │
+        │              │  2. FirstPass frames (Meta Spark)  │
+        │              │  3. Audio + speech claims (Meta)   │
+        │              │  4. Segments (Baseten Spark Open)  │
+        │              │  5. Merge (deterministic)          │
+        │              │  6. Validation (Meta Spark)        │
+        │              │  7. Fusion → recipe (Baseten)      │
+        │              └──────────────────────────────────┘
+        │                                         │
+        └──────── Chef Review ◄── recipe build ───┘
+                       (edit, revise, approve, export)
+```
+
+### Model responsibilities
+
+| Role | Provider | Model | Task |
+|---|---|---|---|
+| Frame analysis | Meta Model API | `muse-spark-1.3` | Scale readings, containers, actions per frame or batch |
+| Global video | Meta Model API | `muse-spark-1.3` | Whole-video culinary context, operations, timestamps |
+| Speech claims | Meta Model API | `muse-spark-1.3` | Structured culinary claims from transcripts |
+| Transcription | Meta Model API | `muse-voice-transcribe-1.0` | Diarized transcription in ≤330 s chunks |
+| Evidence validation | Meta Model API | `muse-spark-1.3` | Contradiction and consistency checks |
+| Segment analysis | Baseten | `meta-models/muse-spark-open-1026` | Native-video culinary events per 30 s window |
+| Recipe fusion | Baseten | `meta-models/muse-spark-open-1026` | Structured recipe draft from merged evidence |
+| Recipe revision | Baseten | `meta-models/muse-spark-open-1026` | One bounded chef-requested rewrite |
+
+Deterministic local stages (no model calls): video intake, frame
+extraction, evidence merge, cost accounting, recipe assembly,
+validation gates, exports.
+
+### FirstPass engines
+
+Selected in the upload UI and pinned in the authorization grant:
+
+| Engine | Frames/request | Concurrency | Output ceiling |
+|---|---|---|---|
+| `single_frame` (default) | 1 | 1 | grant-derived |
+| `contextual_batch` | 10 | 1 | 32,768 |
+| `focused_batch` | 50 | 1 | 65,536 |
+| `parallel_scale` | 10 | 5 | 8,192 |
+
+`parallel_scale` extracts verbatim scale-display readings with
+anchored frame IDs and no shared context between requests. The
+worker may also select an engine via `FIRSTPASS_ENGINE`; a grant
+value conflicting with the worker environment fails closed.
+
+## Repository structure
+
+```text
+src/bakery_intelligence/
+  api/            FastAPI app, jobs, worker, pipeline, multimodal stages
+  inference/      Meta client, FirstPass engines, scale reader, eval
+  video/          Intake, probing, frame extraction
+  recipe_export/  Proposal assembly, labels, PDF, DOCX, revision
+  phase2c/        Prompts, agents, budget ledger
+  models/         Pydantic contracts + generated JSON schemas
+  app/            Legacy demo navigation helpers
+frontend/         React 18 + TypeScript + Vite application
+tests/            Backend pytest suite (isolated tmp storage)
+experiments/      Historical experiment scripts and notes
+scripts/          Ops utilities (backup, launcher, benchmarks)
+docs/             Architecture, schemas, protocols, session notes
+specs/            Product spec and migration guide
+fixtures/         Shared test data layout notes
+```
 
 ## Prerequisites
 
-- Python 3.12 (verified with 3.12.10) and
-  [`uv`](https://docs.astral.sh/uv/) for environment management.
-- Node.js with `npm` for the frontend.
-- OpenCV-system video codecs sufficient to decode MP4 (used by
-  upload validation and frame extraction).
+- Python 3.12 with [`uv`](https://docs.astral.sh/uv/).
+- Node.js 20+ with `npm`.
+- MP4 codecs sufficient for OpenCV decoding.
+- Meta API key for billable inference; Baseten API key for
+  segments, fusion, and revision.
 
-## Installation
+## Local installation
 
 ```powershell
 uv sync
 npm install --prefix frontend
 ```
 
-This creates `.venv/` (Python dependencies from `uv.lock`) and
-installs frontend dependencies. `.venv/`, `frontend/node_modules/`,
-and `frontend/dist/` are git-ignored build artifacts.
+This creates `.venv/` from `uv.lock` and installs frontend
+dependencies. `.venv/`, `frontend/node_modules/`, and
+`frontend/dist/` are git-ignored build artifacts.
 
-## Starting the application
+## Environment configuration
 
-Backend API (from the repository root):
+Copy the template and fill in values (never commit the result):
+
+```powershell
+Copy-Item .env.example .env
+```
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `META_API_KEY` | Meta Model API key (wins over `MODEL_API_KEY`) | — |
+| `MODEL_API_KEY` | Fallback Meta key name | — |
+| `BASETEN_API_KEY` | Baseten inference key | — |
+| `BAKERY_BASETEN_MODEL` | Baseten deployment override | `meta-models/muse-spark-open-1026` |
+| `BAKERY_MAX_VIDEO_UPLOAD_BYTES` | Upload endpoint size gate | 2 GiB |
+| `BAKERY_PIPELINE_MAX_VIDEO_BYTES` | Worker-side size gate | 16 MB |
+| `FIRSTPASS_ENGINE` | Worker engine fallback | `single_frame` |
+
+For videos larger than 16 MB, raise the pipeline bound in the
+worker shell before launching, e.g.
+`$env:BAKERY_PIPELINE_MAX_VIDEO_BYTES = "140000000"`.
+
+## Backend startup
+
+From the repository root:
 
 ```powershell
 .venv\Scripts\python.exe -m uvicorn bakery_intelligence.api.app:build_app --factory --port 8000
@@ -66,105 +170,100 @@ Backend API (from the repository root):
 
 Health check: `http://127.0.0.1:8000/api/health`.
 
-Frontend (from the repository root):
+## Frontend startup
+
+From the repository root:
 
 ```powershell
 npm run dev --prefix frontend
 ```
 
-Open [http://localhost:5173/](http://localhost:5173/) in a browser.
+Open the printed URL (default `http://localhost:5173`). To point
+at another backend, set `VITE_API_BASE` in `frontend/.env`.
 
-Free background worker (offline previews and smoke workflows;
-**never claims paid jobs** unless `--allow-billable` is passed):
+## Worker startup and execution
+
+Free worker (offline previews and smoke workflows; never claims
+paid jobs unless `--allow-billable` is passed):
 
 ```powershell
 .venv\Scripts\python.exe -m bakery_intelligence.api.worker
 ```
 
-## Offline-preview workflow (free)
-
-1. Open **+ New analysis**, drop an MP4 (validated locally:
-   container readability, duration, resolution, SHA-256).
-2. Review projected frames at 1 FPS and the nonbinding cost
-   estimate (or the explicit "cost uncertain" notice).
-3. Click **Run free offline preview**. Observations are
-   simulated, clearly labeled, and never sent to Meta.
-4. When the job completes, open it in the Evidence Review
-   Workspace to inspect frames, save human reviews, and export.
-
-## Paid Meta analysis workflow (billable)
-
-1. Upload and configure as above. The panel shows the model
-   (`muse-spark-1.3`), the projected frame/request count, the
-   nonbinding estimate, and the **authorized maximum of
-   USD 20.00**.
-2. Check the authorization box and click **Authorize and start
-   analysis**. This only enqueues the job with a server-validated
-   grant; uploading or previewing never triggers paid inference.
-3. Execute exactly one authorized pass with the billable launcher:
+Billable one-shot launcher (validates credentials with `--check`
+and executes exactly one authorized pass with `--run`):
 
 ```powershell
 .venv\Scripts\python.exe scripts/run_billable_worker_once.py --check
 .venv\Scripts\python.exe scripts/run_billable_worker_once.py --run
 ```
 
-`--check` validates credentials and exits without launching. For
-videos larger than 16 MB, set the pipeline size bound in the
-same shell first (see [Large-video resource behavior](#large-video-resource-behavior)).
+Explicit recovery of one failed billable job (reuses persisted
+stage outputs; never rebills completed stages):
 
-## Authorization and cost enforcement
+```powershell
+.venv\Scripts\python.exe -m bakery_intelligence.api.worker --recover <run_id> --recover-note "<why the retry is safe>"
+```
 
-- Paid inference starts only from an explicit user action and a
-  server-validated grant bound to the exact workflow, model,
-  frame/request limits, operator, and spending ceiling.
-- Maximum authorized cost: **USD 20.00** (`cost_ceiling_usd`),
-  enforced by a per-request ledger with `strict_cost: true`:
-  sending stops when known spend reaches the cap, and any
-  grant with an unknown cost is rejected rather than executed.
-- `max_attempts=1`, no automatic billable retries, no resume of
-  failed billable runs, and an `uncertain → refuse` policy: a
-  replacement run refactures from scratch and is never started
-  automatically.
-- The generic worker excludes billable workflows by default; a
-  generic pass leaves a queued paid job untouched (`attempts`
-  stays 0). Only the one-shot launcher passes `--allow-billable`.
+## First-time user workflow
 
-Credential variables, by name only (never commit values):
-`META_API_KEY` (wins) or `MODEL_API_KEY`, read from the process
-environment or the local `.env` file.
+1. Open the frontend and choose **New Recipe**.
+2. Enter the recipe name and language, drop an MP4, and pick the
+   FirstPass engine. The panel shows authorized Meta requests and
+   the worst-case frame-analysis bound.
+3. Check the explicit paid-processing authorization and click
+   **Generate my recipe**. This only enqueues the job with a
+   server-validated grant; nothing billable runs yet.
+4. Run the billable launcher (`--check`, then `--run`) to execute
+   the queued job. Track progress in the queue: frame completion,
+   pipeline stage, and recipe-artifact readiness are reported
+   separately.
+5. Open the result in **Review Findings**: resolve uncertain
+   measurements one finding at a time (confirm, correct with an
+   explicit value, cannot-determine, or defer).
+6. Choose **Generate Recipe** to build the draft from reviewed
+   evidence, then refine it in **Review Recipe**.
+7. Request an AI revision with natural-language instructions when
+   needed (creates a new immutable version; the parent is
+   preserved), approve, and export PDF or DOCX.
 
-## Evidence review, correction, and export
+## Human-in-the-loop validation
 
-Completed analyses open in the Evidence Review Workspace: a
-filmstrip timeline, the retained frame viewer with hash-integrity
-notes, the original AI prediction or abstention, and review
-controls (confirm, correct, reject, uncertain) with optional
-notes. Original predictions are immutable; annotations persist
-separately and survive restarts. The preparation record links
-each reading to its evidence frame and marks AI-extracted,
-human-verified, human-corrected, rejected, uncertain, and
-unknown states honestly. CSV/JSON exports preserve model values
-alongside human decisions and never modify source evidence.
+- Findings show the source frame, timestamp, AI prediction, and
+  effective value side by side; corrections never overwrite the
+  original model output.
+- Empty numeric corrections are rejected; confirmation and
+  correction are distinct persisted decisions with reviewer
+  identity and timestamps.
+- Undo restores the previous effective decision without deleting
+  audit history.
+- Generation gates block recipe building while mandatory
+  findings are unresolved; the backend revalidates independently
+  of the UI.
+- Review states are `ai-extracted`, `chef-supplied`,
+  `human-corrected`, `human-verified`, and `unknown`. A human
+  correction is never relabeled as independent verification.
 
-## Local data persistence
+## Evidence provenance and uncertainty
 
-All application state lives under `runs_api/`: staged uploads
-and metadata, per-run work and artifact trees, review records,
-and `jobs.sqlite3`. This directory is git-ignored and is the
-local backup source. The sibling directory
-`bakery-intelligence-backups` holds verified snapshots; see
-`docs/backup-system.md` for backup, trigger, retention, and
-restore procedures.
+- Scale readings keep verbatim display text, unit only when
+  visible, confidence, readability, and source frame reference.
+- Spoken quantities are evidence of utterance, not proof of
+  measurement; audio-identified ingredients are never presented
+  as visually confirmed.
+- Net ingredient quantities are derived only with sufficient
+  tare, container-continuity, and ingredient-association
+  evidence; otherwise they stay unresolved with a recorded
+  reason.
+- Contradictions (audio vs visual, segment vs frame, spoken
+  self-corrections) are preserved in validation records and
+  recipe limitations, never silently resolved.
+- The evidence bundle caps FirstPass readings at the first 40
+  chronological observations; the truncation is recorded in
+  `readings_usable_total` / `readings_truncated` rather than
+  hidden.
 
-## Safe demonstration procedure
-
-Without spending anything: start the API and frontend, open the
-completed analysis `run_387662c3eaab` (30 frames, 6 numeric
-predictions, 24 abstentions) from the Analyses library, inspect
-an AI prediction against its frame, and save a review decision
-to see it reflected in the preparation record.
-
-## Tests and checks
+## Automated testing
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
@@ -173,78 +272,91 @@ npm test --prefix frontend
 npm run build --prefix frontend
 ```
 
-Python tests use isolated temporary storage; they never touch
-`runs_api/` or billable services.
+Backend tests use isolated temporary storage and fake provider
+clients; they never touch `runs_api/` or billable services.
+Frontend tests run under `node --test` with jsdom rendering for
+interaction coverage. The schema check enforces byte-identical
+Pydantic-to-JSON-Schema exports.
 
-## Known limitations and future work
+## Cost and authorization safeguards
 
-- Pipeline executors load the whole video into memory; see
-  [Large-video resource behavior](#large-video-resource-behavior).
-  Memory optimization is future work.
-- The cost estimate is calibrated on a 640×360 reference run
-  and is nonbinding; 1080p frames may cost more input tokens.
-  The USD 20 cap bounds exposure regardless.
-- The pipeline emits an evidence-backed draft (observations,
-  deltas, honest unknowns), not a validated recipe: no
-  ingredient identities, units, net weights, tare events, or
-  preparation steps are invented.
-- No authentication or multi-user model; the local API is a
-  single-operator demo backend.
-- Landing statistics fetch one bundle per listed run, which is
-  slow with many runs.
+- Paid inference requires an explicit user action plus a
+  server-validated grant bound to workflow, model, request cap,
+  token budget, frame bound, operator, timeout, and ceiling.
+- The USD 20.00 `cost_ceiling_usd` with `strict_cost: true`
+  bounds FirstPass Meta spend: sending stops at the cap, and
+  requests with unknown cost halt the run instead of executing.
+- One submit per request; no automatic billable retries and no
+  automatic resume of failed runs — recovery is an explicit,
+  audited operator action.
+- The worst-case frame-analysis bound is shown before
+  authorization; in-flight usage is estimated from
+  provider-published per-token rates, never confirmed billing.
+- Baseten (segments, fusion, revision) has no application-level
+  spending ceiling; usage is recorded with explicit unknown-cost
+  labeling. The USD 20 ceiling must not be read as a total
+  multi-provider cap.
 
-## AI-Executed Chef Review Validation
+## Known limitations
 
-The Phase 2C `bakery_demo_v1` chef-review workflow was executed
-autonomously by an AI agent driving Playwright against the real
-local application (backend + frontend, no mocks). The agent
-assumed the role of a professional bakery chef: it played both
-demo clips, navigated evidence timestamps, corrected 15
-ingredient identities, verified 49 claims, marked the remainder
-cannot-determine, supplied 7 measurement unit/amount pairs, and
-reviewed all 42 preparation steps and both open questions,
-reaching 87 of 87 reviewed with identical state after a browser
-reload. All decisions used the application's existing reviewer
-mechanism and review states (`ai-extracted`, `chef-supplied`,
-`human-corrected`, `human-verified`, `unknown`) under reviewer
-`ai-chef`; no test-only identities or states were introduced.
+- Only the first 40 chronological FirstPass readings enter the
+  evidence bundle; later stable readings are preserved in
+  artifacts but do not reach fusion or validation inputs.
+- Readable scale displays are not net ingredient quantities:
+  tare history, container changes, and ingredient association
+  are frequently unverified.
+- Ingredient identities are often audio-dependent; packaging
+  and labels are rarely visible.
+- Spoken and measured quantities conflict in practice (e.g.
+  self-corrections, 1 g rounding differences); the recipe
+  preserves both sides and asks the chef.
+- Segment timestamps are clip-local estimates; edited footage
+  can misalign absolute timelines.
+- Baseten spend is uncapped; Meta spend beyond FirstPass is
+  estimated, not ceiling-enforced.
+- Recovery reuses completed stages only when fingerprints
+  match; ambiguous prior requests fail closed rather than
+  rebill.
+- Passing offline tests validate contracts and fixtures, not
+  live provider behavior, pricing, or rate limits.
+- Single-operator local application: no authentication or
+  multi-user model.
 
-This exercise validates the review workflow, not the recipe.
-Chef-supplied values may reflect AI culinary judgment rather
-than directly observed measurements, and the resulting review
-does not constitute independent human validation. No
-independently verified ground-truth recipe was available. The
-Playwright journey is reproducible via `node qa/chef_review.mjs`
-(with the backend on :8001 and `VITE_API_BASE`-pointed vite on
-:5174); screenshots and the QA log live in git-ignored
-`qa/shots/`. Review records persist in git-ignored
-`runs_api/fusion_reviews/bakery_demo_v1.json`.
+## Security and privacy considerations
 
-## Large-video resource behavior
+- API keys live in the process environment or local `.env`
+  (git-ignored); they are never printed, persisted in artifacts,
+  or passed via argv by the provided tooling.
+- Videos, frames, transcripts, and inference outputs stay local
+  under git-ignored `runs_api/`; the repository ships no user
+  media or generated results.
+- The EPIC-KITCHENS sample footage referenced by early
+  experiments carries noncommercial constraints; do not
+  redistribute dataset media.
+- Review records persist locally with reviewer identity and
+  timestamps for auditability.
 
-- **In-memory loading (current behavior):** pipeline executors
-  read the entire staged video into RAM (`handle.read()` into
-  `video_bytes`) before writing the run input copy. For the
-  2,074,288,282-byte (≈1.93 GiB) P04_104 analysis, worker
-  process memory peaks around 2.5–3.5 GB on top of the normal
-  interpreter footprint. This behavior is unchanged by this
-  task; streaming execution is future work.
-- **`BAKERY_PIPELINE_MAX_VIDEO_BYTES`:** the pipeline-side byte
-  gate, defaulting to 16 MB. It must be raised in the worker's
-  environment for larger videos, e.g.
-  `$env:BAKERY_PIPELINE_MAX_VIDEO_BYTES = "2074288282"`. Below
-  the gate the job fails explicitly *before* any provider call.
-- **Upload limit (`BAKERY_MAX_VIDEO_UPLOAD_BYTES`):** a separate
-  gate on the upload endpoint (default 2 GiB). Raising the
-  pipeline bound does not change the upload bound or vice versa.
-- **Observed P04_104 characteristics (measured):** 684.7 s,
-  34,235 source frames at 50 FPS, 1920×1080; 685 extracted
-  frames in ~229 s; ~390 MB of retained JPEGs; 685 sequential
-  requests in batches of 5 (tens of minutes of inference);
-  ~6.5 GB total local footprint including input, staging, and
-  frame copies. Machine: 15.4 GB RAM, ample free disk.
-- **Operational recommendations:** run large videos with no
-  other heavy processes, set the pipeline bound in the same
-  shell that launches the worker, prefer the one-shot launcher
-  for paid runs, and back up `runs_api/` before long executions
-  (`scripts/backup_data.py run`).
+## Scripts
+
+| Script | Purpose | Billable |
+|---|---|---|
+| `scripts/run_billable_worker_once.py` | Credential-checked one-shot billable worker launcher | Only with `--run` |
+| `scripts/backup_data.py` | Content-addressed snapshots of `runs_api/` with verified restore | No |
+| `scripts/parallel_scale_experiment.py` | Isolated 5×10 scale-reading decision experiment (dry-run default) | Only with `--execute` |
+| `scripts/benchmark_firstpass.py` | Engine wall-clock comparison harness (dry-run default) | Only with `--execute` |
+| `scripts/sync_contract_schemas.py` | Regenerate/verify Pydantic JSON schemas | No |
+| `scripts/epic_dataset_discovery.py` | Reproducible EPIC-KITCHENS selection pipeline | No |
+| `scripts/muse-meta.ps1`, `scripts/muse-baseten.ps1` | Provider smoke-test helpers | See script headers |
+
+## Further reading
+
+- `specs/video-to-recipe/spec.md` — product requirements and
+  contracts.
+- `docs/architecture/system_proposal.md` — original system
+  proposal (historical; implementation has evolved).
+- `docs/schemas/weighing_event_schema.md` — weighing contract.
+- `docs/evaluation/validation_protocol.md` — validation
+  methodology.
+- `docs/backup-system.md` — backup and restore procedures.
+- `experiments/` — per-experiment notes; each states whether
+  its approach is integrated, superseded, or standalone.

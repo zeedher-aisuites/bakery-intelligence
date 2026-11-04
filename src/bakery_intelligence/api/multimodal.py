@@ -88,10 +88,20 @@ GLOBAL_MAX_TOKENS = 16384
 # unexposed reasoning (finish=length, 4096/4096 tokens, empty
 # content). 8192 leaves headroom for reasoning + JSON.
 SEGMENT_MAX_TOKENS = 8192
-SPEECH_MAX_TOKENS = 8192
+# Verified live: an 8192 ceiling truncated speech claims on the
+# 645-frame production run (output_tokens hit 8192 with 4133
+# reasoning tokens; JSON cut mid-claim). The Meta Responses
+# endpoint accepted 65536 on the same client contract during
+# focused-batch validation (3 live requests, no rejection).
+# The ceiling bounds worst-case spend, not generated length.
+SPEECH_MAX_TOKENS = 65536
 # Verified live: 4096 truncated the validation JSON on a
-# 10 s clip (reasoning + content exceed the budget).
-VALIDATION_MAX_TOKENS = 8192
+# 10 s clip (reasoning + content exceed the budget), and
+# 8192 truncated speech claims on the 645-frame production
+# run. Validation consumes strictly more evidence than
+# speech claims, so it shares the Meta-verified 65536
+# ceiling instead of repeating the same failure.
+VALIDATION_MAX_TOKENS = 65536
 FUSION_MAX_TOKENS = 16384
 # Chef-requested revision: one bounded call. Verified live:
 # 8192 was exhausted by unexposed reasoning (finish=length,
@@ -1338,10 +1348,17 @@ def build_merged_evidence(
                 "provider": claims.get("provider"),
                 "request_id": claims.get("request_id"),
             })
+    readings = firstpass_bundle.get("readings") or []
+    usable = firstpass_bundle.get("readings_usable_total")
+    if not isinstance(usable, int) or usable < len(readings):
+        usable = len(readings)
     return {
         "video": firstpass_bundle.get("video") or {},
-        "readings_total": len(
-            firstpass_bundle.get("readings") or []),
+        "readings_total": len(readings),
+        "readings_usable_total": usable,
+        "readings_truncated": bool(
+            firstpass_bundle.get("readings_truncated",
+                                 usable > len(readings))),
         "weighing": firstpass_bundle.get("weighing") or {},
         "unresolved": firstpass_bundle.get("unresolved") or [],
         "global_result": global_result,
@@ -1608,6 +1625,8 @@ def execute_video_pipeline_multimodal(
         PIPELINE_STATE_FILENAME,
         STAGE_FIRSTPASS_DONE,
         firstpass_engine_from_env,
+    resolve_firstpass_engine,
+        frame_timeout_seconds,
         run_pipeline_from_path,
     )
     from bakery_intelligence.inference.meta_spark import (
@@ -1739,11 +1758,13 @@ def execute_video_pipeline_multimodal(
     except Exception as exc:
         raise fail("frames", exc)
     try:
+        frame_engine = resolve_firstpass_engine(
+        grant.firstpass_engine)
         frame_client = clients.get("frames") or MetaSparkClient(
             model=grant.model,
-            timeout_seconds=grant.timeout_seconds,
+            timeout_seconds=frame_timeout_seconds(
+                frame_engine, grant.timeout_seconds),
             store=grant.store)
-        frame_engine = firstpass_engine_from_env()
         frame_context = (
             _global_context_for_firstpass(global_record)
             if frame_engine == FIRSTPASS_ENGINE_BATCH

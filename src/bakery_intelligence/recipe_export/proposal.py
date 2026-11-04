@@ -87,6 +87,7 @@ def build_evidence_bundle(run_dir: Path, recipe_name: str,
         })
     readings.sort(key=lambda r: (
         r["t"] if isinstance(r["t"], (int, float)) else 1e12))
+    usable_total = len(readings)
     readings = readings[:MAX_READINGS]
 
     objects: dict[str, dict[str, Any]] = {}
@@ -181,6 +182,8 @@ def build_evidence_bundle(run_dir: Path, recipe_name: str,
         "video": video if isinstance(video, dict) else {},
         "readings": readings,
         "readings_total": len(readings),
+        "readings_usable_total": usable_total,
+        "readings_truncated": usable_total > len(readings),
         "multimodal": multimodal,
         "weighing": {
             "tare_observed": (weighing.get("tare_observed")
@@ -388,6 +391,11 @@ def assemble_snapshot(bundle: dict[str, Any],
             or prompts.RECIPE_PROPOSAL.model,
             "proposal_actual_usd": meta.get("actual_usd"),
             "readings_used": len(bundle.get("readings") or []),
+            "readings_usable_total": bundle.get(
+                "readings_usable_total",
+                len(bundle.get("readings") or [])),
+            "readings_truncated": bool(
+                bundle.get("readings_truncated", False)),
         },
         "ingredients": ingredients,
         "excluded_observations": [],

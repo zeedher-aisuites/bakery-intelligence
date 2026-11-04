@@ -137,15 +137,22 @@ STAGE_FIRSTPASS_DONE = "firstpass_done"
 
 # FirstPass engine selection (experiment branch only).
 # "single_frame" is the stable V1 default; "contextual_batch"
-# runs the vendored V2 grouped runner. Selection is a
-# developer-only pipeline parameter (or FIRSTPASS_ENGINE for
-# worker entries); there is no UI control and no workflow
-# registry change. The engine is fingerprinted into durable
-# state so cross-engine resume refuses with a diff.
+# runs the vendored V2 grouped runner; "parallel_scale" runs
+# the parallel scale-reading engine (10 anchored images per
+# request, 5 concurrent requests, no shared context).
+# Contextual and focused selection stays a developer-only
+# pipeline parameter (or FIRSTPASS_ENGINE for worker
+# entries); parallel_scale is additionally selectable from
+# the web UI through the authorization grant. The engine is
+# fingerprinted into durable state so cross-engine resume
+# refuses with a diff.
 FIRSTPASS_ENGINE_SINGLE = "single_frame"
 FIRSTPASS_ENGINE_BATCH = "contextual_batch"
+FIRSTPASS_ENGINE_FOCUSED = "focused_batch"
+FIRSTPASS_ENGINE_SCALE = "parallel_scale"
 FIRSTPASS_ENGINES = (
-    FIRSTPASS_ENGINE_SINGLE, FIRSTPASS_ENGINE_BATCH)
+    FIRSTPASS_ENGINE_SINGLE, FIRSTPASS_ENGINE_BATCH,
+    FIRSTPASS_ENGINE_FOCUSED, FIRSTPASS_ENGINE_SCALE)
 FIRSTPASS_ENGINE_ENV_VAR = "FIRSTPASS_ENGINE"
 FIRSTPASS_BATCH_GROUP_SIZE = 10
 # Maximum per-group output budget for contextual batches. The
@@ -161,6 +168,32 @@ FIRSTPASS_BATCH_MAX_OUTPUT_TOKENS = 32768
 # stay single-submit.
 FIRSTPASS_BATCH_MAX_VALIDATION_ATTEMPTS = 3
 FIRSTPASS_BATCH_MAX_CONSECUTIVE_EXHAUSTED = 2
+# Per-request transport timeout for contextual-batch group
+# calls. V1 single-frame requests keep the grant timeout;
+# batch groups carry ten images plus structured output and
+# need headroom the 120 s grant value does not provide.
+FIRSTPASS_BATCH_TIMEOUT_SECONDS = 240.0
+# Focused-batch (V3) policy: fifty frames per request at
+# the verified per-request image maximum, one 65,536-token
+# output budget per batch, an independent transport
+# timeout knob, and the same validation/early-stop policy
+# as contextual batches.
+FIRSTPASS_FOCUSED_GROUP_SIZE = 50
+FIRSTPASS_FOCUSED_MAX_OUTPUT_TOKENS = 65536
+FIRSTPASS_FOCUSED_TIMEOUT_SECONDS = 240.0
+FIRSTPASS_FOCUSED_MAX_VALIDATION_ATTEMPTS = 3
+FIRSTPASS_FOCUSED_MAX_CONSECUTIVE_EXHAUSTED = 2
+# Parallel scale-reading policy: ten anchored scale photos
+# per request at the live-validated configuration, five
+# concurrent requests, one 8,192-token output budget per
+# batch, a single submit per batch (no retries, no reruns),
+# and an independent transport timeout. Concurrency affects
+# timing only: per-batch results are deterministic and
+# reassembled by frame id, so it is not fingerprinted.
+FIRSTPASS_SCALE_GROUP_SIZE = 10
+FIRSTPASS_SCALE_MAX_CONCURRENCY = 5
+FIRSTPASS_SCALE_MAX_OUTPUT_TOKENS = 8192
+FIRSTPASS_SCALE_TIMEOUT_SECONDS = 240.0
 
 
 def firstpass_engine_from_env() -> str:
@@ -183,6 +216,37 @@ def firstpass_engine_from_env() -> str:
     return value
 
 
+def resolve_firstpass_engine(
+        grant_engine: str | None) -> str:
+    """Resolve the engine from the grant, else the env.
+
+    Grants without an engine key keep the legacy behavior
+    (worker ``FIRSTPASS_ENGINE`` or single-frame default),
+    so stored authorizations are unaffected. A grant engine
+    must name a supported engine; when the worker
+    environment also names an engine and disagrees, the
+    authorization is ambiguous and refused instead of
+    guessing which billable configuration was intended.
+    """
+    import os
+
+    env_value = os.environ.get(
+        FIRSTPASS_ENGINE_ENV_VAR, "").strip()
+    if grant_engine is None:
+        return firstpass_engine_from_env()
+    if grant_engine not in FIRSTPASS_ENGINES:
+        raise GrantError(
+            f"Grant firstpass_engine must be one of "
+            f"{list(FIRSTPASS_ENGINES)}, "
+            f"got {grant_engine!r}.")
+    if env_value and env_value != grant_engine:
+        raise GrantError(
+            f"Grant engine {grant_engine!r} conflicts with "
+            f"{FIRSTPASS_ENGINE_ENV_VAR}={env_value!r}; "
+            f"refusing ambiguous billable execution.")
+    return grant_engine
+
+
 def _validate_firstpass_engine(engine: str) -> str:
     """Accept only supported engine ids (fail fast)."""
     if engine not in FIRSTPASS_ENGINES:
@@ -190,6 +254,18 @@ def _validate_firstpass_engine(engine: str) -> str:
             "firstpass_engine must be one of "
             f"{list(FIRSTPASS_ENGINES)}, got {engine!r}.")
     return engine
+
+
+def _group_token_budget(grant_budget: int, group_size: int,
+                      cap: int) -> int:
+    """Derive a per-group output budget from the grant."""
+    if (isinstance(grant_budget, bool)
+            or not isinstance(grant_budget, int)
+            or grant_budget <= 0):
+        raise ValueError(
+            "grant token budget must be a positive int, "
+            f"got {grant_budget!r}.")
+    return min(grant_budget * group_size, cap)
 
 
 def _batch_token_budget(grant_budget: int) -> int:
@@ -203,14 +279,52 @@ def _batch_token_budget(grant_budget: int) -> int:
     unchanged: total theoretical output volume stays below
     the single-frame equivalent (65 x 32768 < 645 x 4096).
     """
-    if (isinstance(grant_budget, bool)
-            or not isinstance(grant_budget, int)
-            or grant_budget <= 0):
-        raise ValueError(
-            "grant token budget must be a positive int, "
-            f"got {grant_budget!r}.")
-    return min(grant_budget * FIRSTPASS_BATCH_GROUP_SIZE,
-               FIRSTPASS_BATCH_MAX_OUTPUT_TOKENS)
+    return _group_token_budget(
+        grant_budget, FIRSTPASS_BATCH_GROUP_SIZE,
+        FIRSTPASS_BATCH_MAX_OUTPUT_TOKENS)
+
+
+def _focused_token_budget(grant_budget: int) -> int:
+    """Derive the per-batch output budget for focused V3.
+
+    Same grant-derived rule as contextual batches: the
+    per-frame allowance scales by group size and is capped
+    at the V3 maximum, never raised silently.
+    """
+    return _group_token_budget(
+        grant_budget, FIRSTPASS_FOCUSED_GROUP_SIZE,
+        FIRSTPASS_FOCUSED_MAX_OUTPUT_TOKENS)
+
+
+def _scale_token_budget(grant_budget: int) -> int:
+    """Derive the per-batch output budget for scale passes.
+
+    Same grant-derived rule as the other grouped engines:
+    the per-frame allowance scales by group size and is
+    capped at the live-validated 8,192-token maximum, never
+    raised silently.
+    """
+    return _group_token_budget(
+        grant_budget, FIRSTPASS_SCALE_GROUP_SIZE,
+        FIRSTPASS_SCALE_MAX_OUTPUT_TOKENS)
+
+
+def frame_timeout_seconds(engine: str,
+                          grant_timeout_seconds: float) -> float:
+    """Select the FirstPass transport timeout for an engine.
+
+    Grouped engines use their dedicated batch timeouts;
+    every other engine keeps the granted timeout exactly,
+    so V1 behavior is unchanged.
+    """
+    _validate_firstpass_engine(engine)
+    if engine == FIRSTPASS_ENGINE_BATCH:
+        return FIRSTPASS_BATCH_TIMEOUT_SECONDS
+    if engine == FIRSTPASS_ENGINE_FOCUSED:
+        return FIRSTPASS_FOCUSED_TIMEOUT_SECONDS
+    if engine == FIRSTPASS_ENGINE_SCALE:
+        return FIRSTPASS_SCALE_TIMEOUT_SECONDS
+    return grant_timeout_seconds
 
 
 def _contextual_firstpass_runner(
@@ -232,7 +346,8 @@ def _contextual_firstpass_runner(
     Billable posture mirrors the V1 seam: caller client,
     effective per-group token budget (already grant-derived
     and capped by the caller), request cap as the group
-    cap, cost guards, single-submit transport. Validation
+    cap, cost guards, single-submit transport, and the
+    dedicated batch timeout. Validation
     retries and the consecutive-exhaustion early stop are
     enabled; ambiguous transport is never replayed. Fake
     mode uses the deterministic grouped fake; a
@@ -254,6 +369,7 @@ def _contextual_firstpass_runner(
             out_dir=firstpass_dir, model=model,
             group_size=FIRSTPASS_BATCH_GROUP_SIZE,
             token_budget=billable_token_budget,
+            timeout_seconds=FIRSTPASS_BATCH_TIMEOUT_SECONDS,
             global_context=global_context,
             max_groups=billable_max_requests,
             rates_usd_per_m=rates,
@@ -275,6 +391,7 @@ def _contextual_firstpass_runner(
             out_dir=firstpass_dir, model=model,
             group_size=FIRSTPASS_BATCH_GROUP_SIZE,
             token_budget=billable_token_budget,
+            timeout_seconds=FIRSTPASS_BATCH_TIMEOUT_SECONDS,
             global_context=global_context,
             billable=False,
             uncertain_policy=UNCERTAIN_RERUN,
@@ -286,6 +403,153 @@ def _contextual_firstpass_runner(
             client_factory=DeterministicGroupFakeClient,
         )
     return FirstPassV2Runner(config)
+
+
+def _focused_firstpass_runner(
+        frame_refs, source, firstpass_dir, model,
+        meta_backed: bool,
+        client,
+        billable_token_budget: int,
+        billable_max_requests,
+        billable_cost_ceiling_usd,
+        billable_rates_usd_per_m,
+        billable_strict_cost: bool,
+        billable_api_key: str):
+    """Build the V3 focused runner with pipeline bounds.
+
+    Mirrors the V2 seam: caller client, effective per-batch
+    token budget (already grant-derived and capped by the
+    caller), request cap as the batch cap, cost guards,
+    single-submit transport, and the dedicated focused
+    timeout. Fake mode uses the deterministic focused fake.
+    """
+    from bakery_intelligence.inference.firstpass_v3 import (
+        DeterministicFocusedFakeClient,
+        FirstPassV3Config,
+        FirstPassV3Runner,
+    )
+
+    rates = (tuple(billable_rates_usd_per_m)
+             if meta_backed
+             and billable_rates_usd_per_m is not None
+             else None)
+    if meta_backed:
+        config = FirstPassV3Config(
+            frames=list(frame_refs), source=source,
+            out_dir=firstpass_dir, model=model,
+            group_size=FIRSTPASS_FOCUSED_GROUP_SIZE,
+            token_budget=billable_token_budget,
+            timeout_seconds=FIRSTPASS_FOCUSED_TIMEOUT_SECONDS,
+            max_groups=billable_max_requests,
+            rates_usd_per_m=rates,
+            cost_ceiling_usd=billable_cost_ceiling_usd,
+            strict_cost=billable_strict_cost,
+            billable=True,
+            uncertain_policy=UNCERTAIN_REFUSE,
+            max_attempts=1,
+            max_validation_attempts=(
+                FIRSTPASS_FOCUSED_MAX_VALIDATION_ATTEMPTS),
+            max_consecutive_exhausted=(
+                FIRSTPASS_FOCUSED_MAX_CONSECUTIVE_EXHAUSTED),
+            api_key=billable_api_key,
+            client_factory=lambda: client,
+        )
+    else:
+        config = FirstPassV3Config(
+            frames=list(frame_refs), source=source,
+            out_dir=firstpass_dir, model=model,
+            group_size=FIRSTPASS_FOCUSED_GROUP_SIZE,
+            token_budget=billable_token_budget,
+            timeout_seconds=FIRSTPASS_FOCUSED_TIMEOUT_SECONDS,
+            billable=False,
+            uncertain_policy=UNCERTAIN_RERUN,
+            max_attempts=DEFAULT_MAX_ATTEMPTS,
+            max_validation_attempts=(
+                FIRSTPASS_FOCUSED_MAX_VALIDATION_ATTEMPTS),
+            max_consecutive_exhausted=(
+                FIRSTPASS_FOCUSED_MAX_CONSECUTIVE_EXHAUSTED),
+            client_factory=DeterministicFocusedFakeClient,
+        )
+    return FirstPassV3Runner(config)
+
+
+def _scale_firstpass_runner(
+        frame_refs, source, firstpass_dir, model,
+        meta_backed: bool,
+        client,
+        billable_token_budget: int,
+        billable_max_requests,
+        billable_cost_ceiling_usd,
+        billable_rates_usd_per_m,
+        billable_strict_cost: bool,
+        billable_api_key: str):
+    """Build the parallel scale runner with pipeline bounds.
+
+    Mirrors the grouped-engine seam: caller bounds, request
+    cap as the batch cap, cost guards, single submit per
+    batch, and the dedicated scale timeout. Parallel
+    dispatch needs one client per batch, so the meta path
+    spawns a fresh Meta client per batch from the caller
+    client's own configuration instead of sharing one SDK
+    object across threads. Fake mode uses the deterministic
+    scale fake.
+    """
+    from bakery_intelligence.inference.meta_spark import (
+        MetaSparkClient,
+    )
+    from bakery_intelligence.inference.scale_pass import (
+        DeterministicScaleFakeClient,
+        ScalePassConfig,
+        ScalePassRunner,
+    )
+
+    rates = (tuple(billable_rates_usd_per_m)
+             if meta_backed
+             and billable_rates_usd_per_m is not None
+             else None)
+    if meta_backed:
+        if not isinstance(client, MetaSparkClient):
+            raise ValueError(
+                "Parallel scale execution requires a Meta "
+                "client to clone per batch; got "
+                f"{type(client).__name__}.")
+
+        def _spawn() -> MetaSparkClient:
+            return MetaSparkClient(
+                model=client.model,
+                timeout_seconds=client.timeout_seconds,
+                store=client.store,
+                client_factory=client.client_factory)
+
+        config = ScalePassConfig(
+            frames=list(frame_refs), source=source,
+            out_dir=firstpass_dir, model=model,
+            group_size=FIRSTPASS_SCALE_GROUP_SIZE,
+            max_concurrency=FIRSTPASS_SCALE_MAX_CONCURRENCY,
+            token_budget=billable_token_budget,
+            timeout_seconds=FIRSTPASS_SCALE_TIMEOUT_SECONDS,
+            max_batches=billable_max_requests,
+            rates_usd_per_m=rates,
+            cost_ceiling_usd=billable_cost_ceiling_usd,
+            strict_cost=billable_strict_cost,
+            billable=True,
+            uncertain_policy=UNCERTAIN_REFUSE,
+            api_key=billable_api_key,
+            client_factory=_spawn,
+        )
+    else:
+        config = ScalePassConfig(
+            frames=list(frame_refs), source=source,
+            out_dir=firstpass_dir, model=model,
+            group_size=FIRSTPASS_SCALE_GROUP_SIZE,
+            max_concurrency=FIRSTPASS_SCALE_MAX_CONCURRENCY,
+            token_budget=billable_token_budget,
+            timeout_seconds=FIRSTPASS_SCALE_TIMEOUT_SECONDS,
+            billable=False,
+            uncertain_policy=UNCERTAIN_RERUN,
+            client_factory=DeterministicScaleFakeClient,
+        )
+    return ScalePassRunner(config)
 
 # Stage directories wiped for a clean start when no durable
 # state exists. The firstpass directory is never wiped: billed
@@ -1030,13 +1294,26 @@ def _run_pipeline_core(
     _validate_firstpass_engine(firstpass_engine)
     batch_engine = (
         firstpass_engine == FIRSTPASS_ENGINE_BATCH)
-    batch_token_budget = (
-        _batch_token_budget(billable_token_budget)
-        if batch_engine else billable_token_budget)
-    if batch_engine and fake is not None:
+    focused_engine = (
+        firstpass_engine == FIRSTPASS_ENGINE_FOCUSED)
+    scale_engine = (
+        firstpass_engine == FIRSTPASS_ENGINE_SCALE)
+    if scale_engine:
+        group_token_budget = _scale_token_budget(
+            billable_token_budget)
+    elif batch_engine:
+        group_token_budget = _batch_token_budget(
+            billable_token_budget)
+    elif focused_engine:
+        group_token_budget = _focused_token_budget(
+            billable_token_budget)
+    else:
+        group_token_budget = billable_token_budget
+    if ((batch_engine or focused_engine or scale_engine)
+            and fake is not None):
         raise ValueError(
-            "The contextual engine uses the grouped fake "
-            "client; a single-frame fake override is "
+            "Grouped engines use their deterministic fake "
+            "clients; a single-frame fake override is "
             "incompatible.")
     client: InferenceClient = (
         billable_client if meta_backed
@@ -1056,16 +1333,33 @@ def _run_pipeline_core(
         "pass_id": PIPELINE_PASS_ID,
         "batch_size": PIPELINE_BATCH_SIZE,
         "engine": firstpass_engine,
-        "group_size": (FIRSTPASS_BATCH_GROUP_SIZE
-                       if batch_engine else None),
+        "group_size": (
+            FIRSTPASS_BATCH_GROUP_SIZE if batch_engine
+            else FIRSTPASS_FOCUSED_GROUP_SIZE
+            if focused_engine
+            else FIRSTPASS_SCALE_GROUP_SIZE
+            if scale_engine else None),
         "max_validation_attempts": (
             FIRSTPASS_BATCH_MAX_VALIDATION_ATTEMPTS
-            if batch_engine else None),
+            if batch_engine
+            else FIRSTPASS_FOCUSED_MAX_VALIDATION_ATTEMPTS
+            if focused_engine
+            else 1 if scale_engine else None),
         "max_consecutive_exhausted": (
             FIRSTPASS_BATCH_MAX_CONSECUTIVE_EXHAUSTED
-            if batch_engine else None),
+            if batch_engine
+            else FIRSTPASS_FOCUSED_MAX_CONSECUTIVE_EXHAUSTED
+            if focused_engine else None),
+        "timeout_seconds": (
+            FIRSTPASS_BATCH_TIMEOUT_SECONDS if batch_engine
+            else FIRSTPASS_FOCUSED_TIMEOUT_SECONDS
+            if focused_engine
+            else FIRSTPASS_SCALE_TIMEOUT_SECONDS
+            if scale_engine else None),
         "token_budgets": (
-            [batch_token_budget] if (meta_backed or batch_engine)
+            [group_token_budget]
+            if (meta_backed or batch_engine or focused_engine
+                    or scale_engine)
             else list(DEFAULT_BUDGETS)),
         "prompt_sha256": prompt_hash(PIPELINE_PROMPT),
         "max_requests": (
@@ -1181,9 +1475,15 @@ def _run_pipeline_core(
                 or "group_size" not in prior_firstpass
                 or "max_validation_attempts" not in prior_firstpass
                 or "max_consecutive_exhausted"
-                not in prior_firstpass):
+                not in prior_firstpass
+                or "timeout_seconds" not in prior_firstpass):
             # Pre-experiment states predate the engine
-            # fingerprint; they are single-frame runs.
+            # fingerprint; they are single-frame runs. States
+            # from earlier experiment builds predate the
+            # timeout fingerprint and must not silently
+            # resume under the new timeout policy: the None
+            # backfill below matches single-frame runs and
+            # mismatches batch runs, refusing the latter.
             backfilled = dict(prior_firstpass)
             backfilled.setdefault(
                 "engine", FIRSTPASS_ENGINE_SINGLE)
@@ -1192,6 +1492,7 @@ def _run_pipeline_core(
                 "max_validation_attempts", None)
             backfilled.setdefault(
                 "max_consecutive_exhausted", None)
+            backfilled.setdefault("timeout_seconds", None)
             actual["firstpass"] = backfilled
         diffs = _diff_json(expected, actual, "state")
         if diffs:
@@ -1229,7 +1530,7 @@ def _run_pipeline_core(
                 firstpass_dir=firstpass_dir,
                 model=firstpass_config["model"],
                 meta_backed=meta_backed, client=client,
-                billable_token_budget=batch_token_budget,
+                billable_token_budget=group_token_budget,
                 billable_max_requests=billable_max_requests,
                 billable_cost_ceiling_usd=(
                     billable_cost_ceiling_usd),
@@ -1238,6 +1539,34 @@ def _run_pipeline_core(
                 billable_strict_cost=billable_strict_cost,
                 billable_api_key=billable_api_key,
                 global_context=firstpass_global_context)
+        elif focused_engine:
+            runner = _focused_firstpass_runner(
+                frame_refs=frame_refs, source=source_ref,
+                firstpass_dir=firstpass_dir,
+                model=firstpass_config["model"],
+                meta_backed=meta_backed, client=client,
+                billable_token_budget=group_token_budget,
+                billable_max_requests=billable_max_requests,
+                billable_cost_ceiling_usd=(
+                    billable_cost_ceiling_usd),
+                billable_rates_usd_per_m=(
+                    billable_rates_usd_per_m),
+                billable_strict_cost=billable_strict_cost,
+                billable_api_key=billable_api_key)
+        elif scale_engine:
+            runner = _scale_firstpass_runner(
+                frame_refs=frame_refs, source=source_ref,
+                firstpass_dir=firstpass_dir,
+                model=firstpass_config["model"],
+                meta_backed=meta_backed, client=client,
+                billable_token_budget=group_token_budget,
+                billable_max_requests=billable_max_requests,
+                billable_cost_ceiling_usd=(
+                    billable_cost_ceiling_usd),
+                billable_rates_usd_per_m=(
+                    billable_rates_usd_per_m),
+                billable_strict_cost=billable_strict_cost,
+                billable_api_key=billable_api_key)
         elif meta_backed:
             runner_config = billable_runner_config(
                 frames=frame_refs, source=source_ref,
@@ -1270,7 +1599,7 @@ def _run_pipeline_core(
                 billable=False,
                 uncertain_policy=UNCERTAIN_RERUN,
             )
-        if batch_engine:
+        if batch_engine or focused_engine or scale_engine:
             firstpass_report = runner.run()
         else:
             firstpass_report = FirstPassRunner(
@@ -1563,8 +1892,11 @@ def execute_video_pipeline_meta(
     if not storage.source_exists(record.source_object_id):
         raise ValueError(
             f"Unknown source: {record.source_object_id!r}.")
+    engine = resolve_firstpass_engine(grant.firstpass_engine)
     client = _build_meta_client(
-        model=grant.model, timeout_seconds=grant.timeout_seconds,
+        model=grant.model,
+        timeout_seconds=frame_timeout_seconds(
+            engine, grant.timeout_seconds),
         store=grant.store)
     try:
         return _run_source_pipeline(
@@ -1578,7 +1910,7 @@ def execute_video_pipeline_meta(
             billable_api_key=api_key,
             billable_live=True,
             max_frames=grant.max_frames,
-            firstpass_engine=firstpass_engine_from_env(),
+            firstpass_engine=engine,
         )
     except Exception as exc:
         message = str(exc)

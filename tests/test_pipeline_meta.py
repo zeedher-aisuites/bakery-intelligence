@@ -372,6 +372,7 @@ def test_meta_fingerprint_records_policy(tmp_path: Path) -> None:
         "group_size": None,
         "max_validation_attempts": None,
         "max_consecutive_exhausted": None,
+        "timeout_seconds": None,
         "token_budgets": [1024],
         "prompt_sha256": prompt_hash(PIPELINE_PROMPT),
         "max_requests": None,

@@ -56,6 +56,8 @@ function recipeStatusLabel(status: string): string {
   if (status === "approved") return "Approved";
   if (status === "needs_changes") return "Needs Review";
   if (status === "processing") return "Processing";
+  if (status === "awaiting_build") return "Ready to build";
+  if (status === "failed") return "Failed";
   return "Draft";
 }
 
@@ -290,7 +292,8 @@ function Landing(props: {
             {families.map((family) => {
               const latest = family[0];
               const older = family.slice(1);
-              const renderRow = (item: RecipeCard) => (
+              const renderRow = (item: RecipeCard,
+                                 hideName = false) => (
                 <li key={item.recipe_id}>
                   <button
                     type="button"
@@ -298,7 +301,9 @@ function Landing(props: {
                     onClick={() =>
                       props.onOpenRecipe(item.recipe_id)}
                   >
-                    <strong>{item.display_name}</strong>
+                    {!hideName && (
+                      <strong>{item.display_name}</strong>
+                    )}
                     <span className="muted small">
                       {`Version ${item.version_number}`}
                       {" · "}
@@ -356,7 +361,7 @@ function Landing(props: {
                     </button>
                   </div>
                   <ul className="family-versions">
-                    {renderRow(latest)}
+                    {renderRow(latest, true)}
                   </ul>
                   {older.length > 0 && (
                     <details className="family-history">
@@ -364,7 +369,7 @@ function Landing(props: {
                         {`Version history (${older.length})`}
                       </summary>
                       <ul className="family-versions">
-                        {older.map(renderRow)}
+                        {older.map((item) => renderRow(item))}
                       </ul>
                     </details>
                   )}

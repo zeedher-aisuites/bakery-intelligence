@@ -19,6 +19,7 @@ from bakery_intelligence.api.multimodal import (
 from bakery_intelligence.api.pipeline import (
     FIRSTPASS_BATCH_GROUP_SIZE,
     FIRSTPASS_ENGINE_BATCH,
+    FIRSTPASS_ENGINE_FOCUSED,
     FIRSTPASS_ENGINE_SINGLE,
     PipelineResumeError,
     firstpass_engine_from_env,
@@ -144,7 +145,7 @@ def test_batch_rejects_single_frame_fake(tmp_path: Path) -> None:
     )
 
     video = _make_video(tmp_path / "clip.avi")
-    with pytest.raises(ValueError, match="grouped fake"):
+    with pytest.raises(ValueError, match="incompatible"):
         run_pipeline_from_path(**_run_kwargs(
             video, tmp_path / "work",
             fake=DeterministicFakeClient(),
@@ -921,3 +922,455 @@ def test_reject_terminated_firstpass_unit() -> None:
             "frames_total": 645, "frames_observed": 600,
             "frames_failed": 45, "frames_unprocessed": 45})
     assert "request_limit_reached" in str(second.value)
+
+
+def test_frame_timeout_seconds_selects_by_engine() -> None:
+    from bakery_intelligence.api.pipeline import (
+        FIRSTPASS_BATCH_TIMEOUT_SECONDS,
+        frame_timeout_seconds,
+    )
+
+    assert FIRSTPASS_BATCH_TIMEOUT_SECONDS == 240.0
+    assert frame_timeout_seconds(
+        FIRSTPASS_ENGINE_BATCH, 120.0) == 240.0
+    assert frame_timeout_seconds(
+        FIRSTPASS_ENGINE_SINGLE, 45.5) == 45.5
+    with pytest.raises(ValueError, match="firstpass_engine"):
+        frame_timeout_seconds("turbo", 120.0)
+
+
+def test_batch_builder_records_batch_timeout(
+        tmp_path: Path) -> None:
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    client = _ScriptedGroupClient(["valid"] * 4)
+    run_pipeline_from_path(**_billable_batch_kwargs(
+        video, work_dir, client))
+    observations = _read_observations(work_dir)
+    assert observations
+    assert {item["call"]["timeout_seconds"]
+            for item in observations} == {240.0}
+
+
+def test_timeout_fingerprint_by_engine(tmp_path: Path) -> None:
+    video = _make_video(tmp_path / "clip.avi")
+    batch_dir = tmp_path / "batch"
+    run_pipeline_from_path(**_run_kwargs(
+        video, batch_dir,
+        firstpass_engine=FIRSTPASS_ENGINE_BATCH))
+    batch_state = json.loads((
+        batch_dir / "pipeline_state.json").read_text(
+            encoding="utf-8"))
+    assert (batch_state["firstpass"]["timeout_seconds"]
+            == 240.0)
+    single_dir = tmp_path / "single"
+    run_pipeline_from_path(**_run_kwargs(
+        video, single_dir,
+        firstpass_engine=FIRSTPASS_ENGINE_SINGLE))
+    single_state = json.loads((
+        single_dir / "pipeline_state.json").read_text(
+            encoding="utf-8"))
+    assert single_state["firstpass"]["timeout_seconds"] is None
+
+
+def test_legacy_batch_state_without_timeout_refuses_resume(
+        tmp_path: Path) -> None:
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    kwargs = _run_kwargs(
+        video, work_dir,
+        firstpass_engine=FIRSTPASS_ENGINE_BATCH)
+    run_pipeline_from_path(**kwargs)
+    state_path = work_dir / "pipeline_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    del state["firstpass"]["timeout_seconds"]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(PipelineResumeError,
+                       match="timeout_seconds"):
+        run_pipeline_from_path(**kwargs)
+
+
+def test_client_timeout_reaches_sdk_factory() -> None:
+    from bakery_intelligence.inference.meta_spark import (
+        MetaSparkClient,
+    )
+
+    captured: dict[str, Any] = {}
+
+    def factory(api_key: str, timeout: float) -> Any:
+        captured["timeout"] = timeout
+        return object()
+
+    client = MetaSparkClient(
+        model="muse-spark-1.3", timeout_seconds=240.0,
+        client_factory=factory)
+    assert client._require_client("k") is not None  # noqa: SLF001
+    assert captured["timeout"] == 240.0
+
+
+def _billable_focused_kwargs(video: Path, work_dir: Path,
+                             client: Any, **over: Any
+                             ) -> dict[str, Any]:
+    kwargs = _run_kwargs(
+        video, work_dir, billable_client=client,
+        billable_token_budget=4096,
+        billable_max_requests=30,
+        billable_rates_usd_per_m=(1.25, 4.25),
+        firstpass_engine=FIRSTPASS_ENGINE_FOCUSED)
+    kwargs.update(over)
+    return kwargs
+
+
+def test_focused_engine_fake_run(tmp_path: Path) -> None:
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    run_pipeline_from_path(**_run_kwargs(
+        video, work_dir,
+        firstpass_engine=FIRSTPASS_ENGINE_FOCUSED))
+    report = _read_report(work_dir)
+    assert report["pass_id"] == "firstpass_v3"
+    assert report["groups_valid"] == 1
+    assert report["frames_observed"] == 12
+    assert report["stopped_reason"] is None
+    observations = _read_observations(work_dir)
+    assert len(observations) == 12
+    assert observations[0]["pass_id"] == "firstpass_v3"
+
+
+def test_focused_fingerprint_records_policy(
+        tmp_path: Path) -> None:
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    run_pipeline_from_path(**_run_kwargs(
+        video, work_dir,
+        firstpass_engine=FIRSTPASS_ENGINE_FOCUSED))
+    state = json.loads((
+        work_dir / "pipeline_state.json").read_text(
+            encoding="utf-8"))
+    firstpass = state["firstpass"]
+    assert firstpass["engine"] == FIRSTPASS_ENGINE_FOCUSED
+    assert firstpass["group_size"] == 50
+    assert firstpass["token_budgets"] == [51200]
+    assert firstpass["max_validation_attempts"] == 3
+    assert firstpass["max_consecutive_exhausted"] == 2
+    assert firstpass["timeout_seconds"] == 240.0
+
+
+def test_focused_effective_budget_reaches_request(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.inference.firstpass_v3 import (
+        DeterministicFocusedFakeClient,
+    )
+
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    observed: dict[str, Any] = {}
+    real_submit = DeterministicFocusedFakeClient.submit
+
+    def spy_submit(self: Any, prompt_text: str,
+                   image_paths: Any, api_key: str,
+                   max_output_tokens: int,
+                   response_schema: Any = None,
+                   response_schema_name: Any = None) -> Any:
+        observed["max_output_tokens"] = max_output_tokens
+        observed["schema"] = response_schema_name
+        return real_submit(
+            self, prompt_text, image_paths, api_key,
+            max_output_tokens, response_schema,
+            response_schema_name)
+
+    DeterministicFocusedFakeClient.submit = spy_submit  # type: ignore[method-assign]
+    try:
+        run_pipeline_from_path(**_run_kwargs(
+            video, work_dir,
+            firstpass_engine=FIRSTPASS_ENGINE_FOCUSED))
+    finally:
+        DeterministicFocusedFakeClient.submit = (  # type: ignore[method-assign]
+            real_submit)
+    assert observed["max_output_tokens"] == 51200
+    assert observed["schema"] == "FocusedFrameBatch"
+
+
+def test_focused_billable_budget_caps_at_max(
+        tmp_path: Path) -> None:
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    from bakery_intelligence.inference.firstpass_v3 import (
+        DeterministicFocusedFakeClient,
+    )
+
+    run_pipeline_from_path(**_billable_focused_kwargs(
+        video, work_dir, DeterministicFocusedFakeClient()))
+    report = _read_report(work_dir)
+    assert report["token_budget_per_group"] == 65536
+    state = json.loads((
+        work_dir / "pipeline_state.json").read_text(
+            encoding="utf-8"))
+    assert state["firstpass"]["token_budgets"] == [65536]
+
+
+def test_focused_env_selection(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FIRSTPASS_ENGINE", "focused_batch")
+    assert firstpass_engine_from_env() == "focused_batch"
+    monkeypatch.setenv("FIRSTPASS_ENGINE", "bogus")
+    with pytest.raises(ValueError, match="FIRSTPASS_ENGINE"):
+        firstpass_engine_from_env()
+
+
+def test_focused_fake_override_refused(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.inference.fake import (
+        DeterministicFakeClient,
+    )
+
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    with pytest.raises(ValueError, match="incompatible"):
+        run_pipeline_from_path(**_run_kwargs(
+            video, work_dir, fake=DeterministicFakeClient(),
+            firstpass_engine=FIRSTPASS_ENGINE_FOCUSED))
+
+
+def test_focused_cross_engine_resume_refused(
+        tmp_path: Path) -> None:
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    run_pipeline_from_path(**_run_kwargs(
+        video, work_dir,
+        firstpass_engine=FIRSTPASS_ENGINE_SINGLE))
+    with pytest.raises(PipelineResumeError, match="engine"):
+        run_pipeline_from_path(**_run_kwargs(
+            video, work_dir,
+            firstpass_engine=FIRSTPASS_ENGINE_FOCUSED))
+
+
+def test_focused_terminated_gate(tmp_path: Path) -> None:
+    from bakery_intelligence.inference.firstpass_v3 import (
+        DeterministicFocusedFakeClient,
+    )
+
+    video = _make_video(tmp_path / "clip.avi", frame_count=1200)
+    work_dir = tmp_path / "work"
+    script = {500: "{{{", 1000: "{{{"}
+    client = DeterministicFocusedFakeClient(script=script)
+    with pytest.raises(ValueError,
+                       match="consecutive_group_exhaustion"):
+        run_pipeline_from_path(**_billable_focused_kwargs(
+            video, work_dir, client))
+    report = _read_report(work_dir)
+    assert report["groups_valid"] == 1
+    assert report["frames_observed"] == 50
+
+
+def test_frame_timeout_focused_matches_batch() -> None:
+    from bakery_intelligence.api.pipeline import (
+        frame_timeout_seconds,
+    )
+
+    assert frame_timeout_seconds(
+        FIRSTPASS_ENGINE_FOCUSED, 120.0) == 240.0
+    assert frame_timeout_seconds(
+        FIRSTPASS_ENGINE_SINGLE, 45.0) == 45.0
+
+
+def test_scale_engine_registered_and_env(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from bakery_intelligence.api.pipeline import (
+        FIRSTPASS_ENGINE_SCALE,
+        FIRSTPASS_ENGINES,
+    )
+
+    assert FIRSTPASS_ENGINE_SCALE == "parallel_scale"
+    assert FIRSTPASS_ENGINE_SCALE in FIRSTPASS_ENGINES
+    monkeypatch.setenv("FIRSTPASS_ENGINE", "parallel_scale")
+    assert firstpass_engine_from_env() == "parallel_scale"
+
+
+def test_scale_token_budget_derives_from_grant() -> None:
+    from bakery_intelligence.api.pipeline import (
+        _scale_token_budget,
+    )
+
+    assert _scale_token_budget(4096) == 8192
+    assert _scale_token_budget(100) == 1000
+    with pytest.raises(ValueError, match="grant token budget"):
+        _scale_token_budget(0)
+
+
+def test_scale_timeout_seconds() -> None:
+    from bakery_intelligence.api.pipeline import (
+        FIRSTPASS_ENGINE_SCALE,
+        FIRSTPASS_SCALE_TIMEOUT_SECONDS,
+        frame_timeout_seconds,
+    )
+
+    assert frame_timeout_seconds(
+        FIRSTPASS_ENGINE_SCALE, 120.0) == (
+            FIRSTPASS_SCALE_TIMEOUT_SECONDS)
+    assert frame_timeout_seconds(
+        FIRSTPASS_ENGINE_SINGLE, 120.0) == 120.0
+
+
+def test_resolve_firstpass_engine_precedence(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from bakery_intelligence.api.authorization import (
+        GrantError,
+    )
+    from bakery_intelligence.api.pipeline import (
+        FIRSTPASS_ENGINE_BATCH,
+        FIRSTPASS_ENGINE_SCALE,
+        resolve_firstpass_engine,
+    )
+
+    monkeypatch.delenv("FIRSTPASS_ENGINE", raising=False)
+    assert resolve_firstpass_engine(None) == "single_frame"
+    monkeypatch.setenv(
+        "FIRSTPASS_ENGINE", FIRSTPASS_ENGINE_BATCH)
+    assert resolve_firstpass_engine(None) == (
+        FIRSTPASS_ENGINE_BATCH)
+    monkeypatch.delenv("FIRSTPASS_ENGINE", raising=False)
+    assert resolve_firstpass_engine(
+        FIRSTPASS_ENGINE_SCALE) == FIRSTPASS_ENGINE_SCALE
+    with pytest.raises(GrantError, match="firstpass_engine"):
+        resolve_firstpass_engine("turbo")
+    monkeypatch.setenv(
+        "FIRSTPASS_ENGINE", FIRSTPASS_ENGINE_BATCH)
+    with pytest.raises(GrantError, match="conflicts"):
+        resolve_firstpass_engine(FIRSTPASS_ENGINE_SCALE)
+    monkeypatch.setenv(
+        "FIRSTPASS_ENGINE", FIRSTPASS_ENGINE_SCALE)
+    assert resolve_firstpass_engine(
+        FIRSTPASS_ENGINE_SCALE) == FIRSTPASS_ENGINE_SCALE
+
+
+def test_scale_fake_run_batches_orders_adapts(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.api.pipeline import (
+        FIRSTPASS_ENGINE_SCALE,
+        FIRSTPASS_SCALE_GROUP_SIZE,
+    )
+
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    artifacts = run_pipeline_from_path(**_run_kwargs(
+        video, work_dir,
+        firstpass_engine=FIRSTPASS_ENGINE_SCALE))
+    assert "firstpass_report.json" in artifacts
+    report = _read_report(work_dir)
+    assert report["pass_id"] == "scale_pass_v1"
+    assert report["group_size"] == FIRSTPASS_SCALE_GROUP_SIZE
+    assert report["groups_valid"] == 2
+    assert report["frames_total"] == 12
+    assert report["frames_observed"] == 12
+    assert report["frames_failed"] == 0
+    assert report["requests_sent"] == 2
+    assert report["stopped_reason"] is None
+    sizes = [len(json.loads(
+        (work_dir / "firstpass" / "observations"
+         / f"batch_{index:03d}.json").read_text(
+             encoding="utf-8"))) for index in range(2)]
+    assert sizes == [10, 2]
+    observations = _read_observations(work_dir)
+    assert len(observations) == 12
+    first = observations[0]
+    assert first["model_fields"][
+        "scale_display_verbatim"] == "0"
+    assert first["model_fields"]["scale_readable"] is True
+    assert first["model_fields"]["scale_unit_visible"] == "g"
+    assert first["model_fields"]["scale_state"] == "unknown"
+    assert first["model_fields"]["visible_objects"] == []
+    assert first["model_fields"]["visual_frame_id"] == (
+        "F000000")
+    assert first["timestamp_basis"] == TIMESTAMP_BASIS
+    manifest = json.loads(
+        (work_dir / "firstpass" / "anchored"
+         / "manifest.json").read_text(encoding="utf-8"))
+    assert len(manifest) == 12
+    assert manifest[0]["photo_region_verified"] is True
+    state = json.loads(
+        (work_dir / "pipeline_state.json").read_text(
+            encoding="utf-8"))
+    assert state["firstpass"]["engine"] == (
+        FIRSTPASS_ENGINE_SCALE)
+    assert state["firstpass"]["group_size"] == 10
+    assert state["firstpass"]["timeout_seconds"] == 240.0
+    assert state["firstpass"]["token_budgets"] == [8192]
+    assert state["firstpass"]["max_validation_attempts"] == 1
+
+
+def test_scale_rejects_single_frame_fake(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.api.pipeline import (
+        FIRSTPASS_ENGINE_SCALE,
+    )
+    from bakery_intelligence.inference.fake import (
+        DeterministicFakeClient,
+    )
+
+    video = _make_video(tmp_path / "clip.avi")
+    with pytest.raises(ValueError, match="incompatible"):
+        run_pipeline_from_path(**_run_kwargs(
+            video, tmp_path / "work",
+            fake=DeterministicFakeClient(),
+            firstpass_engine=FIRSTPASS_ENGINE_SCALE))
+
+
+def test_scale_cross_engine_resume_refused(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.api.pipeline import (
+        FIRSTPASS_ENGINE_SCALE,
+    )
+
+    video = _make_video(tmp_path / "clip.avi")
+    work_dir = tmp_path / "work"
+    run_pipeline_from_path(**_run_kwargs(
+        video, work_dir,
+        firstpass_engine=FIRSTPASS_ENGINE_SCALE))
+    with pytest.raises(PipelineResumeError):
+        run_pipeline_from_path(**_run_kwargs(
+            video, work_dir,
+            firstpass_engine=FIRSTPASS_ENGINE_SINGLE))
+
+def test_scale_run_feeds_reconstruction_and_review(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.api.jobs import JobRecord
+    from bakery_intelligence.api.pipeline import (
+        FIRSTPASS_ENGINE_SCALE,
+    )
+    from bakery_intelligence.api.review import (
+        build_review_bundle,
+    )
+    from bakery_intelligence.api.storage import (
+        LocalStorageBackend,
+    )
+
+    storage = LocalStorageBackend(tmp_path / "storage")
+    run_id = "run_0123456789ab"
+    work_dir = (storage.base_dir / "runs" / run_id
+                / "work")
+    video = _make_video(tmp_path / "clip.avi")
+    artifacts = run_pipeline_from_path(**_run_kwargs(
+        video, work_dir, run_id=run_id,
+        firstpass_engine=FIRSTPASS_ENGINE_SCALE))
+    measurements = json.loads(
+        artifacts["measurements.json"].decode("utf-8"))
+    assert measurements["measurements"], (
+        "reconstruction consumed no scale readings")
+    assert json.loads(
+        artifacts["weighing_event.json"].decode(
+            "utf-8")) is not None
+    assert json.loads(
+        artifacts["recipe_draft.json"].decode(
+            "utf-8")) is not None
+    record = JobRecord(
+        run_id=run_id,
+        workflow="video_pipeline_offline")
+    bundle = build_review_bundle(storage, record)
+    assert len(bundle["frames"]) == 12
+    first = bundle["frames"][0]["observation"]
+    assert first["model_fields"][
+        "scale_display_verbatim"] == "0"
+    assert first["request_id"] == "fake-scale-1"
+    assert bundle["frames"][0]["image_available"] is True

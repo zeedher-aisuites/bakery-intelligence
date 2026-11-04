@@ -4,11 +4,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  FIRSTPASS_ENGINE_BATCH,
+  FIRSTPASS_ENGINE_FOCUSED,
+  FIRSTPASS_ENGINE_SCALE,
+  FIRSTPASS_ENGINE_SINGLE,
   buildMetaGrant,
   confirmationSentence,
   estimateFrames,
   extraMetaRequests,
+  firstpassRequests,
   formatDuration,
+  scaleWorstCaseUsd,
 } from "../src/upload.ts";
 
 test("estimateFrames rounds up at 1 FPS", () => {
@@ -55,4 +61,39 @@ test("buildMetaGrant reserves one call per ASR chunk", () => {
   assert.equal(buildMetaGrant(700).max_requests, 706);
   assert.equal(extraMetaRequests(330), 4);
   assert.equal(extraMetaRequests(331), 5);
+});
+test("firstpassRequests scales by engine batch size", () => {
+  assert.equal(firstpassRequests(645, FIRSTPASS_ENGINE_SINGLE), 645);
+  assert.equal(firstpassRequests(645, FIRSTPASS_ENGINE_SCALE), 65);
+  assert.equal(firstpassRequests(645, FIRSTPASS_ENGINE_BATCH), 65);
+  assert.equal(firstpassRequests(645, FIRSTPASS_ENGINE_FOCUSED), 13);
+  assert.equal(firstpassRequests(12, FIRSTPASS_ENGINE_SCALE), 2);
+  assert.equal(firstpassRequests(0, FIRSTPASS_ENGINE_SCALE), 0);
+  assert.equal(firstpassRequests(645, "unknown-engine"), 645);
+});
+
+test("scaleWorstCaseUsd matches the backend reservation", () => {
+  const bound = scaleWorstCaseUsd(65);
+  assert.ok(Math.abs(bound - 2.99429) < 0.001);
+  assert.ok(scaleWorstCaseUsd(65) < 20);
+});
+
+test("buildMetaGrant carries the scale engine and batch math", () => {
+  const grant = buildMetaGrant(645, "web-user",
+    new Date("2026-11-01T00:00:00.000Z"), FIRSTPASS_ENGINE_SCALE);
+  assert.equal(grant.firstpass_engine, "parallel_scale");
+  assert.equal(grant.max_requests, 65 + extraMetaRequests(645));
+  assert.equal(grant.token_budget, 4096);
+  assert.equal(
+    grant.confirmation,
+    "authorize video_pipeline_multimodal model muse-spark-1.3 "
+      + `up to ${grant.max_requests} requests, 4096 output tokens, `
+      + "645 frames, operator web-user",
+  );
+});
+
+test("buildMetaGrant defaults to single-frame math", () => {
+  const grant = buildMetaGrant(645);
+  assert.equal(grant.firstpass_engine, "single_frame");
+  assert.equal(grant.max_requests, 645 + extraMetaRequests(645));
 });

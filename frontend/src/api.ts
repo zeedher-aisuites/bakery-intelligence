@@ -400,6 +400,9 @@ export interface ProgressInfo {
   frames_total: number | null;
   frames_processed: number | null;
   percent: number | null;
+  frames_complete: boolean;
+  pipeline_stage: string | null;
+  recipe_ready: boolean;
   error: string | null;
   updated_at: string;
 }

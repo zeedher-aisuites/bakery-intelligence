@@ -7,6 +7,7 @@ the Meta workflow is submitted with a grant but never executed.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import cv2
@@ -231,3 +232,70 @@ def test_upload_and_job_survive_rebuild(tmp_path: Path) -> None:
         f"/api/uploads/{upload['upload_id']}").status_code == 200
     status = rebuilt.get(f"/api/analyses/{created['run_id']}")
     assert status.json()["status"] == "completed"
+
+
+def test_progress_distinguishes_frames_done_from_failed_workflow(
+        tmp_path: Path) -> None:
+    """100% frames must not read as a completed recipe run.
+
+    Regression shape from the live speech-claims failure:
+    645/645 frames, stage firstpass_done, status failed.
+    """
+    client, store, storage = _stack(tmp_path)
+    raw = _make_mp4(tmp_path / "clip.mp4")
+    upload = _upload(client, raw).json()
+    created = client.post(
+        f"/api/uploads/{upload['upload_id']}/analyses",
+        json={"workflow": META, "grant": _grant(2)})
+    run_id = created.json()["run_id"]
+    assert store.fail(run_id, None, "2026-11-04T00:00:00+00:00",
+                      "Stage audio failed: Speech claims "
+                      "returned non-JSON output")
+    work = storage.base_dir / "runs" / run_id / "work"
+    (work / "firstpass" / "observations").mkdir(parents=True)
+    (work / "pipeline_state.json").write_text(json.dumps({
+        "stage": "firstpass_done",
+        "extraction": {"frame_indices": [0, 1]},
+    }), encoding="utf-8")
+    (work / "firstpass" / "observations" / "batch_000.json"
+     ).write_text(json.dumps([{"frame_index": 0},
+                              {"frame_index": 1}]),
+                  encoding="utf-8")
+    (work / "multimodal").mkdir(parents=True)
+    (work / "multimodal" / "cost_report.json").write_text(
+        json.dumps({"calls": [
+            {"stage": "global", "status": "ok"},
+            {"stage": "frames_firstpass", "status": "ok"},
+            {"stage": "audio", "status": "failed"},
+        ]}), encoding="utf-8")
+    progress = client.get(
+        f"/api/analyses/{run_id}/progress").json()
+    assert progress["status"] == "failed"
+    assert progress["frames_processed"] == 2
+    assert progress["frames_total"] == 2
+    assert progress["percent"] == 100.0
+    assert progress["frames_complete"] is True
+    assert progress["pipeline_stage"] == "audio (failed)"
+    assert progress["recipe_ready"] is False
+
+
+def test_progress_marks_recipe_ready_on_fusion_artifact(
+        tmp_path: Path) -> None:
+    """A persisted fusion draft means reviewable artifacts."""
+    client, store, storage = _stack(tmp_path)
+    raw = _make_mp4(tmp_path / "clip.mp4")
+    upload = _upload(client, raw).json()
+    created = client.post(
+        f"/api/uploads/{upload['upload_id']}/analyses",
+        json={"workflow": META, "grant": _grant(2)})
+    run_id = created.json()["run_id"]
+    run_root = storage.base_dir / "runs" / run_id
+    (run_root / "work").mkdir(parents=True)
+    (run_root / "artifacts").mkdir(parents=True)
+    (run_root / "artifacts" / "multimodal_fusion_recipe.json"
+     ).write_text("{}", encoding="utf-8")
+    progress = client.get(
+        f"/api/analyses/{run_id}/progress").json()
+    assert progress["frames_complete"] is False
+    assert progress["pipeline_stage"] is None
+    assert progress["recipe_ready"] is True
