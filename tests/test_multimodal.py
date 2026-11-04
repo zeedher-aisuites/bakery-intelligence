@@ -7,6 +7,7 @@ transcripts). No network, no inference, no billable cost.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -196,6 +197,241 @@ def test_segment_windows_reject_zero() -> None:
         mm.segment_windows(0.0)
 
 
+def test_asr_chunk_windows_split_long_audio() -> None:
+    assert mm.asr_chunk_windows(644.57) == [
+        (0.0, 330.0), (330.0, 644.57)]
+    assert mm.asr_chunk_windows(700.0) == [
+        (0.0, 330.0), (330.0, 660.0), (660.0, 700.0)]
+
+
+def test_asr_chunk_windows_short_audio_single_call() -> None:
+    assert mm.asr_chunk_windows(300.0) == [(0.0, 300.0)]
+    assert mm.asr_chunk_windows(330.0) == [(0.0, 330.0)]
+
+
+def test_asr_chunk_windows_reject_zero() -> None:
+    with pytest.raises(mm.MultimodalError,
+                       match="zero-length"):
+        mm.asr_chunk_windows(0.0)
+
+
+def test_non_frame_reserve_scales_with_chunks() -> None:
+    assert mm.non_frame_reserve(300.0) == 4
+    assert mm.non_frame_reserve(330.0) == 4
+    assert mm.non_frame_reserve(644.57) == 5
+    assert mm.non_frame_reserve(700.0) == 6
+
+
+def _chunk_payload(text: str, turns: list[dict[str, Any]],
+                   session: str) -> dict[str, Any]:
+    return {"audioDurationMs": 330000, "sessionId": session,
+            "transcript": text, "turns": turns,
+            "_elapsed_seconds": 1.0}
+
+
+def test_merge_transcripts_offsets_and_resequences() -> None:
+    merged = mm.merge_transcripts(644.57, [
+        (0.0, _chunk_payload("hello there", [
+            {"turnId": 0, "speaker": "A", "startMs": 220,
+             "endMs": 8060, "transcript": "hello there"}],
+            "s0")),
+        (330.0, _chunk_payload("bake now", [
+            {"turnId": 0, "speaker": "B", "startMs": 500,
+             "endMs": 1500, "transcript": "bake now"}],
+            "s1")),
+    ])
+    assert merged["audioDurationMs"] == 644570
+    assert merged["transcript"] == "hello there bake now"
+    assert merged["chunked"] is True
+    assert merged["chunk_session_ids"] == ["s0", "s1"]
+    assert [t["turnId"] for t in merged["turns"]] == [0, 1]
+    assert merged["turns"][0]["startMs"] == 220
+    assert merged["turns"][1]["startMs"] == 330500
+    assert merged["turns"][1]["endMs"] == 331500
+
+
+def test_merge_transcripts_tolerates_empty_chunk() -> None:
+    merged = mm.merge_transcripts(400.0, [
+        (0.0, _chunk_payload("", [], "s0")),
+        (330.0, _chunk_payload("only here", [
+            {"turnId": 0, "speaker": "A", "startMs": 0,
+             "endMs": 100, "transcript": "only here"}],
+            "s1")),
+    ])
+    assert len(merged["turns"]) == 1
+    assert merged["transcript"] == "only here"
+
+
+def test_merge_transcripts_reject_bad_turns() -> None:
+    with pytest.raises(mm.MultimodalError,
+                       match="no turns list"):
+        mm.merge_transcripts(
+            330.0, [(0.0, {"turns": None})])
+    with pytest.raises(mm.MultimodalError,
+                       match="without numeric startMs"):
+        mm.merge_transcripts(330.0, [(0.0, _chunk_payload(
+            "x", [{"turnId": 0, "speaker": "A",
+                   "endMs": 5, "transcript": "x"}],
+            "s0"))])
+
+
+class FakeASR:
+    """Scripted VoiceTranscribeClient."""
+
+    def __init__(self, payloads: list[Any]) -> None:
+        self._payloads = list(payloads)
+        self.paths: list[Path] = []
+
+    def transcribe(self, audio_path: Path,
+                   mode: str = "DIARIZATION") -> Any:
+        self.paths.append(audio_path)
+        assert mode == "DIARIZATION"
+        next_item = self._payloads.pop(0)
+        if isinstance(next_item, Exception):
+            raise next_item
+        return next_item
+
+
+def _claims_text() -> str:
+    return json.dumps({"claims": [{
+        "claim_id": "c1", "turn_ids": [0],
+        "claim_kind": "instruction", "speaker": "A",
+        "clip_local_start": 0.2, "clip_local_end": 8.0,
+        "interpretation": "mix", "uncertainty": "low"}]})
+
+
+def _audio_harness(tmp_path: Path,
+                   monkeypatch: pytest.MonkeyPatch,
+                   duration: float) -> None:
+    import bakery_intelligence.video.intake as intake
+
+    monkeypatch.setattr(
+        intake, "probe_video",
+        lambda path: {"duration_seconds": duration})
+    monkeypatch.setattr(mm, "has_audio_stream",
+                        lambda path: True)
+    monkeypatch.setattr(
+        mm, "split_wav",
+        lambda src, start, length, dest: dest.write_bytes(
+            b"wav"))
+    (tmp_path / "audio.wav").write_bytes(b"fake-wav")
+
+
+def test_audio_stage_short_audio_single_call(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _audio_harness(tmp_path, monkeypatch, 300.0)
+    asr = FakeASR([_chunk_payload("hello", [
+        {"turnId": 0, "speaker": "A", "startMs": 0,
+         "endMs": 1000, "transcript": "hello"}],
+        "s0")])
+    meta = FakeMeta([_claims_text()])
+    transcript, claims, calls = mm.run_audio_stage(
+        meta, asr, Path("clip.mp4"),  # type: ignore[arg-type]
+        tmp_path)
+    assert asr.paths == [
+        tmp_path / "asr_chunks" / "chunk_000.wav"]
+    assert transcript is not None
+    assert transcript["chunked"] is False
+    assert transcript["turns"][0]["startMs"] == 0
+    assert claims is not None
+    assert [c.stage for c in calls] == [
+        "audio_transcribe_chunk_000", "speech_claims"]
+    assert all(c.status == "ok" for c in calls)
+
+
+def test_audio_stage_resumes_completed_chunk(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _audio_harness(tmp_path, monkeypatch, 400.0)
+    chunks = tmp_path / "asr_chunks"
+    chunks.mkdir()
+    (chunks / "chunk_000.json").write_text(json.dumps({
+        "index": 0, "start_seconds": 0.0,
+        "end_seconds": 330.0,
+        "payload": _chunk_payload("first part", [
+            {"turnId": 0, "speaker": "A", "startMs": 0,
+             "endMs": 1000, "transcript": "first part"}],
+            "s0")}), encoding="utf-8")
+    asr = FakeASR([_chunk_payload("second part", [
+        {"turnId": 0, "speaker": "B", "startMs": 500,
+         "endMs": 900, "transcript": "second part"}],
+        "s1")])
+    meta = FakeMeta([_claims_text()])
+    transcript, claims, calls = mm.run_audio_stage(
+        meta, asr, Path("clip.mp4"),  # type: ignore[arg-type]
+        tmp_path)
+    assert len(asr.paths) == 1
+    assert asr.paths[0].name == "chunk_001.wav"
+    assert transcript is not None
+    assert transcript["chunked"] is True
+    assert transcript["turns"][1]["startMs"] == 330500
+    assert [c.stage for c in calls] == [
+        "audio_transcribe_chunk_000",
+        "audio_transcribe_chunk_001", "speech_claims"]
+    assert calls[0].status == "reused"
+    assert calls[0].estimate_usd == 0.0
+    assert calls[1].status == "ok"
+
+
+def test_audio_stage_chunk_failure_preserves_prior(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _audio_harness(tmp_path, monkeypatch, 400.0)
+    asr = FakeASR([
+        _chunk_payload("first part", [
+            {"turnId": 0, "speaker": "A", "startMs": 0,
+             "endMs": 1000, "transcript": "first part"}],
+            "s0"),
+        RuntimeError("provider 400"),
+    ])
+    meta = FakeMeta([_claims_text()])
+    with pytest.raises(mm.MultimodalError,
+                       match=r"ASR chunk 1 \(330\.0s\) failed"):
+        mm.run_audio_stage(
+            meta, asr, Path("clip.mp4"),  # type: ignore[arg-type]
+            tmp_path)
+    assert (tmp_path / "asr_chunks" / "chunk_000.json"
+            ).is_file()
+    failed = json.loads(
+        (tmp_path / "asr_chunk_001_failed.json").read_text(
+            encoding="utf-8"))
+    assert failed["start_seconds"] == 330.0
+    assert "RuntimeError" in failed["error"]
+
+
+def test_audio_stage_reuses_transcript_and_claims(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _audio_harness(tmp_path, monkeypatch, 400.0)
+    (tmp_path / "transcript.json").write_text(json.dumps({
+        "audioDurationMs": 400000, "sessionId": "s0",
+        "transcript": "all done", "turns": [
+            {"turnId": 0, "speaker": "A", "startMs": 0,
+             "endMs": 1000, "transcript": "all done"}],
+        "chunked": True, "chunks": [
+            {"index": 0, "start_seconds": 0.0,
+             "end_seconds": 330.0, "request_id": None},
+            {"index": 1, "start_seconds": 330.0,
+             "end_seconds": 400.0, "request_id": None}],
+    }), encoding="utf-8")
+    (tmp_path / "speech_claims.json").write_text(json.dumps({
+        "model": mm.SPARK_MODEL, "provider": "meta",
+        "prompt_version": "v1.0", "request_id": "resp_1",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "result": {"claims": []}}), encoding="utf-8")
+    asr = FakeASR([])
+    meta = FakeMeta([])
+    transcript, claims, calls = mm.run_audio_stage(
+        meta, asr, Path("clip.mp4"),  # type: ignore[arg-type]
+        tmp_path)
+    assert asr.paths == []
+    assert meta.calls == []
+    assert transcript is not None
+    assert claims is not None
+    assert [c.stage for c in calls] == [
+        "audio_transcribe_chunk_000",
+        "audio_transcribe_chunk_001", "speech_claims"]
+    assert all(c.status == "reused" for c in calls)
+    assert calls[2].usage["input_tokens"] == 10
+
+
 def test_video_part_shape() -> None:
     part = mm.video_part(b"\x00\x01")
     assert part["type"] == "video_url"
@@ -244,6 +480,15 @@ def test_baseten_model_id_rejects_override(
     with pytest.raises(mm.MultimodalError,
                        match="must be exactly"):
         mm.baseten_model_id()
+
+
+def test_baseten_client_disables_sdk_retries(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """One explicit request: no hidden duplicate attempts."""
+    monkeypatch.setenv(mm.BASETEN_KEY_VAR, "test-key")
+    monkeypatch.delenv(mm.BASETEN_MODEL_VAR, raising=False)
+    client = mm.BasetenClient(timeout_seconds=1.0)
+    assert client._client.max_retries == 0  # noqa: SLF001
 
 
 def test_get_validator_unknown() -> None:
@@ -571,6 +816,84 @@ def test_revision_stage_rejects_bad_schema(
             tmp_path)
 
 
+class FakeBasetenMeta(FakeBaseten):
+    """Fake Baseten with finish reason and usage control."""
+
+    def __init__(self, content: str, finish_reason: Any,
+                 output_tokens: int) -> None:
+        super().__init__([content])
+        self._finish = finish_reason
+        self._out = output_tokens
+
+    def chat(self, messages: list[dict[str, Any]],
+             max_tokens: int) -> dict[str, Any]:
+        result = super().chat(messages, max_tokens)
+        result["finish_reason"] = self._finish
+        result["usage"] = {"input_tokens": 6613,
+                           "output_tokens": self._out,
+                           "total_tokens": 6613 + self._out}
+        return result
+
+
+def test_revision_stage_detects_truncated_empty_output(
+        tmp_path: Path) -> None:
+    """finish=length with no content names budget exhaustion.
+
+    Regression: the live chef revision failed with
+    8192/8192 output tokens and zero content bytes; the
+    error must say the budget was exhausted, not merely
+    that the output was non-JSON.
+    """
+    fake = FakeBasetenMeta("", "length", 8192)
+    with pytest.raises(mm.MultimodalError,
+                       match="exhausted the token budget"):
+        mm.run_revision_stage(
+            fake, {"recipe_name": "R"},  # type: ignore[arg-type]
+            tmp_path)
+    stored = json.loads(
+        (tmp_path / "revision_raw_failed.json").read_text(
+            encoding="utf-8"))
+    assert stored["failure_category"] == "truncated"
+    assert stored["usage"]["output_tokens"] == 8192
+    assert (tmp_path / "revision_raw_failed.txt").is_file()
+
+
+def test_revision_stage_detects_empty_stop_output(
+        tmp_path: Path) -> None:
+    fake = FakeBasetenMeta("   ", "stop", 12)
+    with pytest.raises(mm.MultimodalError,
+                       match="empty output"):
+        mm.run_revision_stage(
+            fake, {"recipe_name": "R"},  # type: ignore[arg-type]
+            tmp_path)
+    stored = json.loads(
+        (tmp_path / "revision_raw_failed.json").read_text(
+            encoding="utf-8"))
+    assert stored["failure_category"] == "empty"
+
+
+def test_revision_stage_marks_truncated_malformed_output(
+        tmp_path: Path) -> None:
+    fake = FakeBasetenMeta('{"title": "cut', "length", 16384)
+    with pytest.raises(mm.MultimodalError,
+                       match="non-JSON output"):
+        mm.run_revision_stage(
+            fake, {"recipe_name": "R"},  # type: ignore[arg-type]
+            tmp_path)
+    stored = json.loads(
+        (tmp_path / "revision_raw_failed.json").read_text(
+            encoding="utf-8"))
+    assert stored["failure_category"] == "truncated"
+    assert (tmp_path / "revision_raw_failed.txt"
+            ).read_text(encoding="utf-8") == '{"title": "cut'
+
+
+def test_revision_stage_uses_fusion_scale_budget() -> None:
+    """Revision shares the evidence-backed 16384 budget."""
+    assert mm.REVISION_MAX_TOKENS == 16384
+    assert mm.REVISION_MAX_TOKENS == mm.FUSION_MAX_TOKENS
+
+
 def _grant_payload(workflow: str) -> dict[str, Any]:
     confirmation = confirmation_sentence(
         workflow, "muse-spark-1.3", 10, 4096, 6,
@@ -753,6 +1076,72 @@ def test_executor_runs_global_before_frames(
     assert order == ["global", "frames"]
 
 
+def test_reuse_segments_requires_complete_set(
+        tmp_path: Path) -> None:
+    (tmp_path / "segments_index.json").write_text(json.dumps({
+        "count": 2, "segments": [{"index": 0}, {"index": 1}],
+    }), encoding="utf-8")
+    (tmp_path / "segment_000.json").write_text(json.dumps({
+        "index": 0, "request_id": "c0", "usage": {},
+        "result": {"events": []}}), encoding="utf-8")
+    assert mm._reuse_segments(tmp_path) is None  # noqa: SLF001
+    (tmp_path / "segment_001.json").write_text(json.dumps({
+        "index": 1, "request_id": "c1", "usage": {},
+        "result": {"events": []}}), encoding="utf-8")
+    index, records = mm._reuse_segments(  # noqa: SLF001
+        tmp_path) or (None, None)
+    assert index is not None
+    assert [r["request_id"] for r in records] == ["c0", "c1"]
+
+
+def test_executor_reuses_global_without_call(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A persisted global.json means zero new global calls."""
+    import bakery_intelligence.api.pipeline as pipeline_mod
+
+    storage, record = _smoke_executor(tmp_path, monkeypatch)
+    mm_dir = (tmp_path / "runs" / "run_0123456789ab"
+              / "work" / "multimodal")
+    mm_dir.mkdir(parents=True)
+    (mm_dir / "global.json").write_text(json.dumps({
+        "model": mm.SPARK_MODEL, "provider": "meta",
+        "prompt_version": "v1.0", "request_id": "resp_old",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "result": json.loads(_global_text()),
+    }), encoding="utf-8")
+
+    class ExplodingMeta(FakeMeta):
+        def upload_file(self, path: Path,
+                        purpose: str = "user_data") -> str:
+            raise AssertionError(
+                "global must not re-upload on resume")
+
+        def create_response(self, *args: Any,
+                            **kwargs: Any) -> Any:
+            raise AssertionError(
+                "global must not re-call on resume")
+
+    def explode_frames(**kwargs: Any) -> dict[str, bytes]:
+        raise AssertionError("stop here: frames reached")
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_pipeline_from_path",
+        explode_frames)
+    with pytest.raises(mm.MultimodalError,
+                       match="Stage frames failed"):
+        mm.execute_video_pipeline_multimodal(
+            storage, record,
+            clients={"meta": ExplodingMeta([])})
+    report = json.loads(
+        (mm_dir / "cost_report.json").read_text(
+            encoding="utf-8"))
+    assert [c["stage"] for c in report["calls"]] == [
+        "global", "frames"]
+    assert report["calls"][0]["status"] == "reused"
+    assert report["calls"][0]["request_id"] == "resp_old"
+    assert report["calls"][0]["estimate_usd"] == 0.0
+
+
 def test_executor_global_failure_starts_nothing_else(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A global rejection means zero frame and Baseten calls."""
@@ -783,3 +1172,320 @@ def test_executor_global_failure_starts_nothing_else(
     assert [c["stage"] for c in report["calls"]] == [
         "global"]
     assert report["meta_estimate_usd_total"] == 0.0
+
+
+def test_parse_json_strict_strips_illegal_control_chars() -> None:
+    """Interior control bytes must not kill an otherwise valid parse.
+
+    Regression: live speech-claims output was complete head
+    and tail at 6926/8192 tokens yet failed strict parsing;
+    the cause was illegal control bytes inside a string value,
+    not truncation.
+    """
+    raw = '{"claims": [{"text": "flour\x00sugar\x07x"}]}'
+    parsed = mm.parse_json_strict(raw, "Speech claims")
+    assert parsed["claims"][0]["text"] == "floursugarx"
+
+
+def test_parse_json_strict_keeps_tab_newline_cr() -> None:
+    """Tab, LF, and CR pass through the sanitizer untouched."""
+    raw = '{"a": "x\x0by"}'
+    assert mm.parse_json_strict(raw, "label") == {"a": "xy"}
+    with pytest.raises(mm.MultimodalError,
+                       match="non-JSON output"):
+        mm.parse_json_strict('{"a": "x\ty"}', "label")
+
+
+def test_parse_json_tolerant_strips_illegal_control_chars() -> None:
+    text = '```json\n{"a": "x\x1bz"}\n```'
+    assert mm.parse_json_tolerant(text, "X") == {"a": "xz"}
+
+
+def test_merge_transcripts_preserves_provider_order() -> None:
+    """Turns keep chunk, then provider, order (no startMs sort).
+
+    Re-sorting by startMs would reorder provider turns and
+    break the contiguous-chunk contract: each chunk's turns
+    stay in the order the provider returned them.
+    """
+    merged = mm.merge_transcripts(660.0, [
+        (0.0, _chunk_payload("b a", [
+            {"turnId": 0, "speaker": "A", "startMs": 5000,
+             "endMs": 6000, "transcript": "b"},
+            {"turnId": 1, "speaker": "A", "startMs": 1000,
+             "endMs": 2000, "transcript": "a"}],
+            "s0")),
+        (330.0, _chunk_payload("c", [
+            {"turnId": 0, "speaker": "B", "startMs": 100,
+             "endMs": 200, "transcript": "c"}],
+            "s1")),
+    ])
+    assert [t["transcript"] for t in merged["turns"]] == [
+        "b", "a", "c"]
+    assert [t["turnId"] for t in merged["turns"]] == [0, 1, 2]
+    assert merged["turns"][2]["startMs"] == 330100
+
+
+def test_frame_stage_calls_resumed_records_zero_new_spend() -> None:
+    """A resumed run re-verifies frames without new billing."""
+    firstpass = {"input_tokens": 10, "output_tokens": 5,
+                 "requests_sent": 645,
+                 "batches_completed": 129,
+                 "cost_usd_estimated": 4.4356}
+    fresh = mm.frame_stage_calls(firstpass)[0]
+    assert fresh.status == "ok"
+    assert fresh.estimate_usd == 4.4356
+    resumed = mm.frame_stage_calls(firstpass, resumed=True)[0]
+    assert resumed.status == "reused"
+    assert resumed.estimate_usd == 0.0
+    assert resumed.usage["requests_sent"] == 645
+
+
+def test_speech_claims_failure_persists_full_output(
+        tmp_path: Path) -> None:
+    """A failed speech parse keeps the complete model text."""
+    bad = '{"claims": [broken ' + "x" * 3000
+    with pytest.raises(mm.MultimodalError,
+                       match="Speech claims"):
+        mm.run_speech_claims(FakeMeta([bad]), [], tmp_path)
+    assert (tmp_path / "speech_claims_failed.txt").read_text(
+        encoding="utf-8") == bad
+    failed = json.loads(
+        (tmp_path / "speech_claims_failed.json").read_text(
+            encoding="utf-8"))
+    assert failed["raw_text_file"] == "speech_claims_failed.txt"
+    assert failed["content_length"] == len(bad)
+
+
+def _segment_record(index: int, start: float, end: float,
+                    clip_bytes: bytes,
+                    request_id: str = "chat_old0"
+                    ) -> dict[str, Any]:
+    return {
+        "index": index, "start_seconds": start,
+        "end_seconds": end,
+        "clip_sha256": hashlib.sha256(
+            clip_bytes).hexdigest(),
+        "clip_bytes": len(clip_bytes),
+        "model": mm.BASETEN_MODEL, "provider": "baseten",
+        "prompt_version": prompts.LOCAL_ANALYST.version,
+        "request_id": request_id,
+        "finish_reason": "stop",
+        "usage": {"input_tokens": 1, "output_tokens": 1,
+                  "total_tokens": 2},
+        "result": json.loads(_segment_text(index)),
+    }
+
+
+def test_segment_stage_reuses_verified_records(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Persisted segments are re-verified, never rebilled.
+
+    Regression: a late segment failure once forced the
+    whole stage to rerun, rebilling every segment that had
+    already succeeded.
+    """
+    cuts: list[tuple[float, float]] = []
+
+    def fake_cut(src: Path, start: float, length: float,
+                 dest: Path) -> None:
+        cuts.append((start, length))
+        dest.write_bytes(b"clip" + bytes([len(cuts)]))
+
+    monkeypatch.setattr(mm, "cut_subclip", fake_cut)
+    clips = tmp_path / "clips"
+    clips.mkdir()
+    clip0 = b"persisted-clip-0"
+    (clips / "seg_000.mp4").write_bytes(clip0)
+    (tmp_path / "segment_000.json").write_text(
+        json.dumps(_segment_record(0, 0.0, 30.0, clip0)),
+        encoding="utf-8")
+    fake = FakeBaseten([_segment_text(1), _segment_text(2)])
+    index, calls = mm.run_segment_stage(
+        fake, Path("clip.mp4"), 65.0,  # type: ignore[arg-type]
+        "global summary", tmp_path)
+    assert cuts == [(30.0, 30.0), (60.0, 5.0)]
+    assert [c.status for c in calls] == [
+        "reused", "ok", "ok"]
+    assert calls[0].request_id == "chat_old0"
+    assert calls[0].estimate_usd is None
+    assert index["count"] == 3
+    assert index["segments"][0]["request_id"] == "chat_old0"
+    # The context chain rebuilds from the reused record.
+    assert "segment 0 summary" in fake.calls[0][
+        "messages"][0]["content"][0]["text"]
+
+
+def test_segment_stage_redoes_changed_clip(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clip that no longer matches its record is redone."""
+    monkeypatch.setattr(
+        mm, "cut_subclip",
+        lambda src, start, length, dest: dest.write_bytes(
+            b"fresh-clip"))
+    clips = tmp_path / "clips"
+    clips.mkdir()
+    (clips / "seg_000.mp4").write_bytes(b"stale-bytes")
+    (tmp_path / "segment_000.json").write_text(
+        json.dumps(_segment_record(
+            0, 0.0, 30.0, b"other-bytes")),
+        encoding="utf-8")
+    fake = FakeBaseten([_segment_text(0)])
+    _, calls = mm.run_segment_stage(
+        fake, Path("clip.mp4"), 10.0,  # type: ignore[arg-type]
+        "", tmp_path)
+    assert len(fake.calls) == 1
+    assert calls[0].status == "ok"
+    assert calls[0].request_id == "chat_fake1"
+
+
+def test_usable_segment_record_rejects_mismatch(
+        tmp_path: Path) -> None:
+    """Wrong window or invalid result means redo, not reuse."""
+    clips = tmp_path / "clips"
+    clips.mkdir()
+    clip = b"clip-bytes"
+    (clips / "seg_000.mp4").write_bytes(clip)
+    record = _segment_record(0, 0.0, 30.0, clip)
+    (tmp_path / "segment_000.json").write_text(
+        json.dumps(record), encoding="utf-8")
+    assert mm._usable_segment_record(  # noqa: SLF001
+        tmp_path, 0, 0.0, 30.0) is not None
+    assert mm._usable_segment_record(  # noqa: SLF001
+        tmp_path, 0, 0.0, 60.0) is None
+    record["result"] = {"operations": []}
+    (tmp_path / "segment_000.json").write_text(
+        json.dumps(record), encoding="utf-8")
+    assert mm._usable_segment_record(  # noqa: SLF001
+        tmp_path, 0, 0.0, 30.0) is None
+
+
+def test_segment_parse_failure_persists_full_text(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed segment keeps its complete model output."""
+    monkeypatch.setattr(
+        mm, "cut_subclip",
+        lambda src, start, length, dest: dest.write_bytes(
+            b"clip"))
+    bad = '{"operations": [broken ' + "y" * 3000
+    fake = FakeBaseten([bad])
+    with pytest.raises(mm.MultimodalError,
+                       match="non-JSON output"):
+        mm.run_segment_stage(
+            fake, Path("clip.mp4"), 10.0,  # type: ignore[arg-type]
+            "", tmp_path)
+    assert (tmp_path / "segment_000_failed.txt").read_text(
+        encoding="utf-8") == bad
+    failed = json.loads(
+        (tmp_path / "segment_000_failed.json").read_text(
+            encoding="utf-8"))
+    assert failed["raw_text_file"] == "segment_000_failed.txt"
+    assert failed["content_length"] == len(bad)
+
+
+def test_write_stage_failure_rotates_prior_attempt(
+        tmp_path: Path) -> None:
+    """A second failed attempt keeps the first one's files."""
+    mm.write_stage_failure(tmp_path, "segment_007", {
+        "request_id": "chat_first", "error": "boom1"})
+    (tmp_path / "segment_007_failed.txt").write_text(
+        "first-output", encoding="utf-8")
+    mm.write_stage_failure(tmp_path, "segment_007", {
+        "request_id": "chat_second", "error": "boom2"})
+    latest = json.loads(
+        (tmp_path / "segment_007_failed.json").read_text(
+            encoding="utf-8"))
+    assert latest["request_id"] == "chat_second"
+    rotated = json.loads(
+        (tmp_path / "segment_007_chat_first_failed.json")
+        .read_text(encoding="utf-8"))
+    assert rotated["request_id"] == "chat_first"
+    assert (tmp_path / "segment_007_chat_first_failed.txt"
+            ).read_text(encoding="utf-8") == "first-output"
+    # Same attempt re-diagnosed: overwrite, no rotation.
+    mm.write_stage_failure(tmp_path, "segment_007", {
+        "request_id": "chat_second", "error": "boom2b"})
+    assert not (tmp_path / "segment_007_chat_second_failed.json"
+                ).exists()
+
+
+def test_segment_reading_value_cases() -> None:
+    unit = mm._segment_reading_value  # noqa: SLF001 - unit seam
+    assert unit({"value": 238, "unit": "g"}) == 238.0
+    assert unit({"value": 14.5}) == 14.5
+    assert unit({"value": True}) is None
+    assert unit({"value": float("inf")}) is None
+    assert unit({"value": None,
+                 "display_reading": "112, briefly 114"}) == 112.0
+    assert unit({"value": None,
+                 "display_reading": "0-1g"}) == 0.0
+    assert unit({"value": None,
+                 "display_reading": "blurred"}) is None
+    assert unit({"value": None}) is None
+    assert unit({}) is None
+
+
+def test_merged_evidence_lifts_segment_measurements() -> None:
+    """Segment displays join FirstPass readings with provenance.
+
+    Regression: fusion grounding only saw Path A readings,
+    so a quantity recorded by the segment path (e.g. a
+    stable 238 on the TRUPER display) failed validation as
+    ungrounded even though it was genuinely observed.
+    """
+    bundle = {"readings": [{"t": 1.0, "value": 40.0,
+                            "unit": None}],
+              "visible_objects": [], "containers": [],
+              "video": {}, "weighing": {}, "unresolved": []}
+    segments = [{
+        "index": 6, "model": mm.BASETEN_MODEL,
+        "provider": "baseten", "request_id": "chat_seg6",
+        "result": {"measurements": [
+            {"value": 238, "unit": "g",
+             "timestamp_seconds": 345.0},
+            {"value": None,
+             "display_reading": "112, briefly 114",
+             "unit": "g", "timestamp": 450.0},
+            {"value": None, "display_reading": "blurred"},
+            {"value": None},
+            "not-a-dict",
+        ]},
+    }]
+    merged = mm.build_merged_evidence(
+        bundle, {"result": {"operations": []}},
+        segments, None, None)
+    scales = [item for item in merged["items"]
+              if item["kind"] == "scale_reading"]
+    assert [(item["value"], item["source"], item["t"])
+            for item in scales] == [
+                (40.0, "frames", 1.0),
+                (238.0, "segment_006", 345.0),
+                (112.0, "segment_006", 450.0),
+            ]
+    assert scales[1]["unit"] == "g"
+    assert scales[1]["request_id"] == "chat_seg6"
+    assert scales[1]["provider"] == "baseten"
+    assert scales[2]["display_reading"] == "112, briefly 114"
+
+
+def test_fusion_stage_accepts_segment_grounded_quantity(
+        tmp_path: Path) -> None:
+    """A seen quantity matching a segment reading validates."""
+    merged = _merged()
+    merged["items"] = [*merged["items"], {
+        "source": "segment_006", "kind": "scale_reading",
+        "t": 345.0, "value": 238.0, "unit": "g",
+        "model": mm.BASETEN_MODEL, "provider": "baseten",
+        "request_id": "chat_seg6",
+    }]
+    good = _proposal(ingredients=[
+        {"name": "white liquid", "quantity": 238.0,
+         "unit": None, "provenance": "seen_video",
+         "basis": "Stable 238 after tare at t~345s."}])
+    fake = FakeBaseten([json.dumps(good)])
+    record, call = mm.run_fusion_stage(
+        fake, merged, _validation_record(),  # type: ignore[arg-type]
+        "Roles XL", "es", tmp_path)
+    assert record["result"]["ingredients"][0][
+        "quantity"] == 238.0
+    assert call.status == "ok"

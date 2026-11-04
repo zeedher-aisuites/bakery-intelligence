@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -141,6 +142,113 @@ def test_fail_and_complete_require_ownership(tmp_path: Path) -> None:
     assert service.get(record.run_id).status == STATUS_RUNNING
     assert store.fail(record.run_id, "worker-a", now, "boom") is True
     assert service.get(record.run_id).status == STATUS_FAILED
+
+
+def test_requeue_billable_failed_roundtrip(
+        tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    record = service.submit(WORKFLOW_STORAGE_SMOKE)
+    store = service.store
+    now = utc_now_iso()
+    store.claim_next("worker-a", now)
+    assert store.fail(
+        record.run_id, "worker-a", now, "ASR 400") is True
+    assert store.requeue_billable_failed(
+        record.run_id, now, "patched ASR limit") is True
+    reread = service.get(record.run_id)
+    assert reread is not None
+    assert reread.status == STATUS_QUEUED
+    assert reread.attempts == 2
+    assert reread.claimed_by is None
+    assert "patched ASR limit" in (reread.error or "")
+    assert "ASR 400" in (reread.error or "")
+
+
+def test_requeue_billable_failed_refuses(
+        tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    record = service.submit(WORKFLOW_STORAGE_SMOKE)
+    store = service.store
+    now = utc_now_iso()
+    assert store.requeue_billable_failed(
+        record.run_id, now, "note") is False
+    assert store.requeue_billable_failed(
+        "run_0123456789ab", now, "note") is False
+    store.claim_next("worker-a", now)
+    assert store.fail(
+        record.run_id, "worker-a", now, "x") is True
+    assert store.requeue_billable_failed(
+        record.run_id, now, "note",
+        max_attempts=1) is False
+    with pytest.raises(ValueError, match="operator note"):
+        store.requeue_billable_failed(
+            record.run_id, now, "  ")
+
+
+def test_amend_grant_max_requests_rebuilds_confirmation(
+        tmp_path: Path) -> None:
+    from bakery_intelligence.api.authorization import (
+        confirmation_sentence,
+        parse_grant,
+    )
+    from bakery_intelligence.api.jobs import (
+        WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
+    )
+
+    service = _service(tmp_path)
+    payload = {
+        "grant_format": "bakery-billable-grant/1",
+        "workflow": WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
+        "provider": "meta", "model": "muse-spark-1.3",
+        "max_requests": 10, "token_budget": 4096,
+        "max_frames": 6, "operator": "tester",
+        "created_at": "2026-11-03T00:00:00Z",
+    }
+    payload["confirmation"] = confirmation_sentence(
+        payload["workflow"], payload["model"], 10, 4096, 6,
+        "tester")
+    record = service.submit(
+        WORKFLOW_VIDEO_PIPELINE_MULTIMODAL,
+        source_object_id="clip.mp4", grant=payload)
+    store = service.store
+    now = utc_now_iso()
+    store.claim_next("worker-a", now)
+    assert store.fail(
+        record.run_id, "worker-a", now, "ASR 400") is True
+    assert store.amend_grant_max_requests(
+        record.run_id, 2, "mandatory ASR chunking") == (10, 12)
+    reread = service.get(record.run_id)
+    assert reread is not None
+    assert reread.status == STATUS_FAILED
+    amended = parse_grant(json.loads(reread.grant_json or "{}"))
+    assert amended.max_requests == 12
+    assert "up to 12 requests" in amended.confirmation
+    assert "mandatory ASR chunking" in (reread.error or "")
+    assert "ASR 400" in (reread.error or "")
+
+
+def test_amend_grant_refuses_nonfailed_or_empty(
+        tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    record = service.submit(WORKFLOW_STORAGE_SMOKE)
+    store = service.store
+    assert store.amend_grant_max_requests(
+        record.run_id, 1, "note") is None
+    assert store.amend_grant_max_requests(
+        "run_0123456789ab", 1, "note") is None
+    now = utc_now_iso()
+    store.claim_next("worker-a", now)
+    assert store.fail(
+        record.run_id, "worker-a", now, "x") is True
+    with pytest.raises(ValueError, match="operator note"):
+        store.amend_grant_max_requests(
+            record.run_id, 1, "  ")
+    with pytest.raises(ValueError, match="positive"):
+        store.amend_grant_max_requests(
+            record.run_id, 0, "note")
+    with pytest.raises(ValueError, match="no grant"):
+        store.amend_grant_max_requests(
+            record.run_id, 1, "note")
 
 
 def test_billable_stale_job_fails_without_requeue(

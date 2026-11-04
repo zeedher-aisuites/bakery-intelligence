@@ -406,3 +406,714 @@ def test_revise_route_sends_evidence_to_model(
     assert seen["evidence"]["merged"][
         "readings_total"] == 5
     assert seen["chef_instructions"] == "Clean the wording."
+
+
+def _snapshot() -> dict[str, Any]:
+    return {
+        "snapshot_id": "r1",
+        "title": "Roles XL",
+        "language": "es",
+        "recipe_status": "draft",
+        "ingredients": [
+            {"name": "flour", "quantity": 700.0, "unit": "g",
+             "quantity_status": "seen_video",
+             "quantity_basis": "Display 700.",
+             "evidence": []},
+            {"name": "salt", "quantity": None, "unit": None,
+             "quantity_status": "ai_estimated",
+             "quantity_basis": "Estimate.",
+             "evidence": []},
+        ],
+        "method": [
+            {"number": 1, "instruction": "Mix."},
+            {"number": 2, "instruction": "Bake."},
+        ],
+        "limitations": ["Confirm salt."],
+        "improvement_suggestions": [{
+            "id": "flour-amount", "label": "Flour amount",
+            "hint": "Grams of flour.", "placeholder": "700"}],
+        "open_questions": [],
+        "technical_limitations": [],
+    }
+
+
+def _revised(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "title": "Roles XL v2",
+        "ingredients": [
+            {"name": "flour", "quantity": 700.0, "unit": "g"},
+            {"name": "salt", "quantity": 3.0, "unit": "g"},
+        ],
+        "method": [
+            {"number": 1, "instruction": "Mix well."},
+            {"number": 2, "instruction": "Bake."},
+        ],
+        "notes": ["Salt set per chef."],
+        "changes_summary": "Set salt to 3 g.",
+    }
+    base.update(overrides)
+    return base
+
+
+def _client_with_recipe(tmp_path: Path,
+                        monkeypatch: pytest.MonkeyPatch,
+                        revised: dict[str, Any] | None = None,
+                        failure: Exception | None = None):
+    root = tmp_path / "runs_api"
+    app = build_app(storage_dir=root)
+    create_record(root, "Roles XL", "es",
+                  source_run_id=None, recipe_id="r1")
+    (root / "recipes" / "r1" / "snapshot.json").write_text(
+        json.dumps(_snapshot()), encoding="utf-8")
+    calls: dict[str, Any] = {}
+
+    def fake_revision(client: Any, bundle: dict[str, Any],
+                      out_dir: Path):
+        calls["bundle"] = bundle
+        calls["count"] = calls.get("count", 0) + 1
+        if failure is not None:
+            raise failure
+        return ({"provider": "baseten", "model": "mm",
+                 "request_id": "chat_rev1",
+                 "parsed": revised}, None)
+
+    monkeypatch.setattr(
+        app_module, "run_revision_stage", fake_revision)
+    monkeypatch.setenv("BASETEN_API_KEY", "test-key")
+    return TestClient(app), root, calls
+
+
+def _submission(**overrides: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "instructions": "",
+        "suggestions": [{
+            "id": "flour-amount", "selected": True,
+            "value": "750"}],
+        "allow_ingredient_changes": True,
+        "confirmed": True,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_revise_accepts_valued_suggestions_without_text(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Chef corrections alone satisfy revision validation."""
+    client, root, calls = _client_with_recipe(
+        tmp_path, monkeypatch, _revised())
+    before = (root / "recipes" / "r1" / "snapshot.json"
+              ).read_bytes()
+    response = client.post("/api/recipes/r1/revise",
+                           json=_submission())
+    assert response.status_code == 201
+    assert calls["count"] == 1
+    bundle = calls["bundle"]
+    assert bundle["selected_suggestions"] == [{
+        "id": "flour-amount", "value": "750"}]
+    assert bundle["allow_ingredient_changes"] is True
+    payload = response.json()
+    assert payload["recipe_id"] == "r1_r1"
+    assert payload["parent_version"] == "r1"
+    assert payload["request_id"] == "chat_rev1"
+    assert (root / "recipes" / "r1_r1" / "snapshot.json"
+            ).is_file()
+    assert (root / "recipes" / "r1_r1" / "record.json"
+            ).is_file()
+    assert payload["recipe"]["recipe_status"] == "draft"
+    # Parent untouched.
+    assert (root / "recipes" / "r1" / "snapshot.json"
+            ).read_bytes() == before
+    assert not (root / "recipes" / "r1" / "revising.lock"
+                ).exists()
+    ledger = json.loads(
+        (root / "phase2c" / "ledger.json").read_text(
+            encoding="utf-8"))
+    assert any("revision/r1/r1_r1" in json.dumps(entry)
+               for entry in ledger.get("spent") or [])
+
+
+def test_revise_accepts_text_without_selections(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    client, _, calls = _client_with_recipe(
+        tmp_path, monkeypatch, _revised())
+    response = client.post(
+        "/api/recipes/r1/revise",
+        json=_submission(instructions="Clarify the steps.",
+                         suggestions=[]))
+    assert response.status_code == 201
+    assert calls["count"] == 1
+
+
+def test_revise_rejects_empty_form(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    client, root, calls = _client_with_recipe(
+        tmp_path, monkeypatch, _revised())
+    response = client.post(
+        "/api/recipes/r1/revise",
+        json=_submission(instructions="  ", suggestions=[]))
+    assert response.status_code == 422
+    assert "at least" in response.json()["detail"]
+    assert calls.get("count", 0) == 0
+    assert not (root / "recipes" / "r1_r1").exists()
+    # Selected-but-empty is not a valid correction either.
+    response = client.post(
+        "/api/recipes/r1/revise",
+        json=_submission(
+            instructions="",
+            suggestions=[{"id": "flour-amount",
+                          "selected": True, "value": "  "}]))
+    assert response.status_code == 422
+    assert calls.get("count", 0) == 0
+
+
+def test_revise_rejects_unconfirmed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    client, _, calls = _client_with_recipe(
+        tmp_path, monkeypatch, _revised())
+    response = client.post("/api/recipes/r1/revise",
+                           json=_submission(confirmed=False))
+    assert response.status_code == 422
+    assert calls.get("count", 0) == 0
+
+
+def test_revise_failure_preserves_original(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bakery_intelligence.api.multimodal import (
+        MultimodalError,
+    )
+
+    client, root, calls = _client_with_recipe(
+        tmp_path, monkeypatch, _revised(),
+        failure=MultimodalError("Revision returned empty "
+                                "output (finish=stop)."))
+    before = (root / "recipes" / "r1" / "snapshot.json"
+              ).read_bytes()
+    response = client.post("/api/recipes/r1/revise",
+                           json=_submission())
+    assert response.status_code == 502
+    assert calls["count"] == 1
+    assert (root / "recipes" / "r1" / "snapshot.json"
+            ).read_bytes() == before
+    version = root / "recipes" / "r1_r1"
+    assert not (version / "snapshot.json").exists()
+    assert not (version / "record.json").exists()
+    assert not (root / "recipes" / "r1" / "revising.lock"
+                ).exists()
+
+
+def test_revise_lock_blocks_duplicates(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bakery_intelligence.api.jobs import utc_now_iso
+
+    client, root, calls = _client_with_recipe(
+        tmp_path, monkeypatch, _revised())
+    (root / "recipes" / "r1" / "revising.lock").write_text(
+        json.dumps({"started_at": utc_now_iso()}),
+        encoding="utf-8")
+    response = client.post("/api/recipes/r1/revise",
+                           json=_submission())
+    assert response.status_code == 409
+    assert calls.get("count", 0) == 0
+
+
+def test_revise_stale_lock_allows_retry(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    client, root, calls = _client_with_recipe(
+        tmp_path, monkeypatch, _revised())
+    (root / "recipes" / "r1" / "revising.lock").write_text(
+        json.dumps({"started_at": "2020-01-01T00:00:00+00:00"}),
+        encoding="utf-8")
+    response = client.post("/api/recipes/r1/revise",
+                           json=_submission())
+    assert response.status_code == 201
+    assert calls["count"] == 1
+
+
+def test_revise_keeps_provenance_of_unchanged_rows(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Only rows the model changed lose seen_video status."""
+    client, root, _ = _client_with_recipe(
+        tmp_path, monkeypatch, _revised())
+    response = client.post("/api/recipes/r1/revise",
+                           json=_submission())
+    assert response.status_code == 201
+    rows = response.json()["recipe"]["ingredients"]
+    assert rows[0]["quantity_status"] == "seen_video"
+    assert rows[1]["quantity_status"] == "ai_estimated"
+
+
+def test_revise_rejects_unauthorized_ingredient_change(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    client, root, calls = _client_with_recipe(
+        tmp_path, monkeypatch, _revised())
+    response = client.post(
+        "/api/recipes/r1/revise",
+        json=_submission(allow_ingredient_changes=False))
+    assert response.status_code == 422
+    assert "without authorization" in response.json()["detail"]
+    assert calls["count"] == 1
+    assert not (root / "recipes" / "r1_r1" / "snapshot.json"
+                ).exists()
+
+
+def test_next_version_id_reuses_diagnostics_dir(
+        tmp_path: Path):
+    root = tmp_path / "runs_api"
+    corpse = root / "recipes" / "r1_r1"
+    corpse.mkdir(parents=True)
+    (corpse / "revision_raw_failed.json").write_text(
+        "{}", encoding="utf-8")
+    assert app_module._next_version_id(  # noqa: SLF001
+        root, "r1") == "r1_r1"
+    (corpse / "record.json").write_text("{}", encoding="utf-8")
+    assert app_module._next_version_id(  # noqa: SLF001
+        root, "r1") == "r1_r2"
+
+
+def test_validate_revision_protects_rows_and_steps():
+    recipe = {"ingredients": [
+        {"name": "flour", "quantity": 700.0, "unit": "g"}],
+        "method": [{"number": 1,
+                    "instruction": "Mix."}]}
+    good = {"title": "T", "ingredients": [
+        {"name": "flour", "quantity": 700.0, "unit": "g"}],
+        "method": [{"number": 1, "instruction": "Mix well."}],
+        "notes": ["n"], "changes_summary": "c"}
+    assert revision_mod.validate_revision(
+        recipe, good, False) == good
+    bad = json.loads(json.dumps(good))
+    bad["ingredients"][0]["quantity"] = 750.0
+    with pytest.raises(revision_mod.RevisionError,
+                       match="without authorization"):
+        revision_mod.validate_revision(recipe, bad, False)
+    assert revision_mod.validate_revision(
+        recipe, bad, True) == bad
+    bad_steps = json.loads(json.dumps(good))
+    bad_steps["method"] = []
+    with pytest.raises(revision_mod.RevisionError,
+                       match="step count"):
+        revision_mod.validate_revision(recipe, bad_steps, True)
+
+
+def test_assemble_version_relabels_only_changed_rows():
+    recipe = {"ingredients": [
+        {"name": "flour", "quantity": 700.0, "unit": "g",
+         "quantity_status": "seen_video",
+         "quantity_basis": "Display 700."}],
+        "method": [{"number": 1, "instruction": "Mix."}]}
+    revised = {"title": "T", "ingredients": [
+        {"name": "flour", "quantity": 750.0, "unit": "g"}],
+        "method": [{"number": 1, "instruction": "Mix well."}],
+        "notes": ["n"], "changes_summary": "c"}
+    meta = {"recipe_id": "r1_r1", "parent_id": "r1",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "language": "es", "instructions": "i",
+            "suggestions": [],
+            "allow_ingredient_changes": True}
+    snapshot = revision_mod.assemble_version(
+        recipe, revised, meta)
+    row = snapshot["ingredients"][0]
+    assert row["quantity"] == 750.0
+    assert row["quantity_status"] == "ai_estimated"
+    assert snapshot["recipe_status"] == "draft"
+    assert snapshot["revision"]["parent_version"] == "r1"
+    assert snapshot["revision"]["request_id"] is None
+    same = json.loads(json.dumps(revised))
+    same["ingredients"][0]["quantity"] = 700.0
+    snapshot = revision_mod.assemble_version(
+        recipe, same, meta)
+    assert snapshot["ingredients"][0][
+        "quantity_status"] == "seen_video"
+
+
+def test_match_chef_suggestion_cases():
+    match = revision_mod.match_chef_suggestion
+    suggestions = [
+        {"id": "azucar_g", "value": "50"},
+        {"id": "vainilla_g", "value": "1 capful"},
+        {"id": "flour-amount", "value": 750},
+    ]
+    labels = {"azucar_g": "Azúcar para la masa",
+              "vainilla_g": "Esencia de vainilla",
+              "flour-amount": "Flour amount"}
+    found = match("Azúcar", 50.0, suggestions, labels)
+    assert found is not None and found["id"] == "azucar_g"
+    found = match("Esencia de vainilla", 1,
+                  suggestions, labels)
+    assert found is not None and found["id"] == "vainilla_g"
+    found = match("Flour", 750, suggestions, labels)
+    assert found is not None
+    # Wrong value: same name, no support.
+    assert match("Azúcar", 999.0,
+                 suggestions, labels) is None
+    # Wrong name: same value, no support.
+    assert match("Truffle", 50.0,
+                 suggestions, labels) is None
+    # One correction justifies one row.
+    used = {"azucar_g"}
+    assert match("Azúcar", 50.0,
+                 suggestions, labels, used) is None
+    # Degenerate inputs never match.
+    assert match("", 50.0, suggestions, labels) is None
+    assert match("Azúcar", None,
+                 suggestions, labels) is None
+    assert match("Azúcar", 50.0, None, labels) is None
+    assert match(
+        "Azúcar", 50.0,
+        [{"id": "azucar_g", "value": "a lot"}],
+        labels) is None
+
+
+def _addition_recipe():
+    return {
+        "ingredients": [
+            {"name": "flour", "quantity": 700.0, "unit": "g",
+             "quantity_status": "seen_video",
+             "quantity_basis": "Display 700."}],
+        "method": [{"number": 1, "instruction": "Mix."}],
+        "improvement_suggestions": [
+            {"id": "azucar_g",
+             "label": "Azúcar para la masa"}],
+    }
+
+
+def _addition_revised(extra):
+    return {
+        "title": "T",
+        "ingredients": [
+            {"name": "flour", "quantity": 700.0, "unit": "g"},
+            extra],
+        "method": [{"number": 1, "instruction": "Mix well."}],
+        "notes": ["n"], "changes_summary": "c"}
+
+
+def test_validate_revision_accepts_supported_addition():
+    recipe = _addition_recipe()
+    revised = _addition_revised(
+        {"name": "Azúcar", "quantity": 50.0, "unit": "g"})
+    out = revision_mod.validate_revision(
+        recipe, revised, True,
+        [{"id": "azucar_g", "value": "50"}])
+    assert len(out["ingredients"]) == 2
+
+
+def test_validate_revision_rejects_unsupported_addition():
+    recipe = _addition_recipe()
+    # Invented row: nothing selected supports it.
+    revised = _addition_revised(
+        {"name": "Truffle", "quantity": 5.0, "unit": "g"})
+    with pytest.raises(revision_mod.RevisionError,
+                       match="unsupported addition"):
+        revision_mod.validate_revision(
+            recipe, revised, True,
+            [{"id": "azucar_g", "value": "50"}])
+    # Unknown suggestion id cannot launder an addition.
+    revised = _addition_revised(
+        {"name": "Truffle", "quantity": 5.0, "unit": "g"})
+    with pytest.raises(revision_mod.RevisionError,
+                       match="unsupported addition"):
+        revision_mod.validate_revision(
+            recipe, revised, True,
+            [{"id": "truffle_x", "value": "5"}])
+    # Additions need authorization.
+    revised = _addition_revised(
+        {"name": "Azúcar", "quantity": 50.0, "unit": "g"})
+    with pytest.raises(revision_mod.RevisionError,
+                       match="one ingredient row per input"):
+        revision_mod.validate_revision(
+            recipe, revised, False,
+            [{"id": "azucar_g", "value": "50"}])
+
+
+def test_validate_revision_rejects_duplicate_support():
+    recipe = _addition_recipe()
+    revised = _addition_revised(
+        {"name": "Azúcar", "quantity": 50.0, "unit": "g"})
+    revised["ingredients"].append(
+        {"name": "Azúcar refinada", "quantity": 50.0,
+         "unit": "g"})
+    with pytest.raises(revision_mod.RevisionError,
+                       match="unsupported addition"):
+        revision_mod.validate_revision(
+            recipe, revised, True,
+            [{"id": "azucar_g", "value": "50"}])
+
+
+def test_validate_revision_rejects_deletion_with_allow():
+    recipe = _addition_recipe()
+    recipe["ingredients"].append(
+        {"name": "salt", "quantity": 3.0, "unit": "g"})
+    revised = {
+        "title": "T",
+        "ingredients": [
+            {"name": "flour", "quantity": 700.0, "unit": "g"}],
+        "method": [{"number": 1, "instruction": "Mix."}],
+        "notes": ["n"], "changes_summary": "c"}
+    with pytest.raises(revision_mod.RevisionError,
+                       match="removed ingredient rows"):
+        revision_mod.validate_revision(recipe, revised, True, [])
+
+
+def test_assemble_version_appends_supported_rows():
+    recipe = _addition_recipe()
+    revised = _addition_revised(
+        {"name": "Azúcar", "quantity": 50.0, "unit": "g"})
+    meta = {"recipe_id": "r1_r1", "parent_id": "r1",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "language": "es", "instructions": "",
+            "suggestions": [{"id": "azucar_g",
+                             "value": "50"}],
+            "allow_ingredient_changes": True}
+    snapshot = revision_mod.assemble_version(
+        recipe, revised, meta)
+    rows = snapshot["ingredients"]
+    assert len(rows) == 2
+    assert rows[0]["quantity_status"] == "seen_video"
+    assert rows[1]["quantity_status"] == "ai_estimated"
+    assert "azucar_g" in rows[1]["quantity_basis"]
+    assert rows[1]["evidence"] == []
+    assert snapshot["revision"]["selected_suggestions"] == [
+        {"id": "azucar_g", "value": "50"}]
+
+
+def test_assemble_version_cites_chef_basis_for_changes():
+    recipe = _addition_recipe()
+    revised = {
+        "title": "T",
+        "ingredients": [
+            {"name": "flour", "quantity": 750.0, "unit": "g"}],
+        "method": [{"number": 1, "instruction": "Mix."}],
+        "notes": ["n"], "changes_summary": "c"}
+    meta = {"recipe_id": "r1_r1", "parent_id": "r1",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "language": "es", "instructions": "",
+            "suggestions": [{"id": "flour-amount",
+                             "value": "750"}],
+            "allow_ingredient_changes": True}
+    recipe["improvement_suggestions"].append(
+        {"id": "flour-amount", "label": "Flour amount"})
+    snapshot = revision_mod.assemble_version(
+        recipe, revised, meta)
+    row = snapshot["ingredients"][0]
+    assert row["quantity"] == 750.0
+    assert row["quantity_status"] == "ai_estimated"
+    assert "flour-amount" in row["quantity_basis"]
+
+
+def test_assemble_version_pure_rename_keeps_status():
+    """A rename without quantity change keeps seen_video."""
+    recipe = _addition_recipe()
+    revised = {
+        "title": "T",
+        "ingredients": [
+            {"name": "Bread flour", "quantity": 700.0,
+             "unit": "g"}],
+        "method": [{"number": 1, "instruction": "Mix."}],
+        "notes": ["n"], "changes_summary": "c"}
+    meta = {"recipe_id": "r1_r1", "parent_id": "r1",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "language": "es", "instructions": "Rename.",
+            "suggestions": [],
+            "allow_ingredient_changes": True}
+    snapshot = revision_mod.assemble_version(
+        recipe, revised, meta)
+    row = snapshot["ingredients"][0]
+    assert row["name"] == "Bread flour"
+    assert row["quantity_status"] == "seen_video"
+    assert row["quantity_basis"] == "Display 700."
+
+
+def test_revise_route_persists_supported_addition(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """End to end: a justified extra row becomes a version."""
+    client, root, calls = _client_with_recipe(
+        tmp_path, monkeypatch, _revised())
+    parsed = _revised()
+    parsed["ingredients"].append(
+        {"name": "sugar", "quantity": 50.0, "unit": "g"})
+    (root / "recipes" / "r1" / "snapshot.json").write_text(
+        json.dumps(_snapshot_with_sugar()), encoding="utf-8")
+
+    def fake_revision(client: Any, bundle: dict[str, Any],
+                      out_dir: Path):
+        calls["count"] = calls.get("count", 0) + 1
+        return ({"provider": "baseten", "model": "mm",
+                 "request_id": "chat_rev2",
+                 "parsed": parsed}, None)
+
+    monkeypatch.setattr(
+        app_module, "run_revision_stage", fake_revision)
+    body = _submission(suggestions=[
+        {"id": "sugar_g", "selected": True, "value": "50"}])
+    response = client.post("/api/recipes/r1/revise", json=body)
+    assert response.status_code == 201
+    rows = response.json()["recipe"]["ingredients"]
+    assert len(rows) == 3
+    assert rows[2]["name"] == "sugar"
+    assert rows[2]["quantity_status"] == "ai_estimated"
+    assert "sugar_g" in rows[2]["quantity_basis"]
+
+
+def _snapshot_with_sugar() -> dict[str, Any]:
+    snapshot = _snapshot()
+    snapshot["improvement_suggestions"].append(
+        {"id": "sugar_g", "label": "Sugar for dough",
+         "hint": "Grams of sugar.", "placeholder": "50"})
+    return snapshot
+
+
+def _correction_parsed() -> dict[str, Any]:
+    return {
+        "title": "T",
+        "ingredients": [
+            {"name": "Whole milk", "quantity": 238.0,
+             "unit": "g"},
+            {"name": "Sugar", "quantity": 50.0, "unit": "g"}],
+        "method": [
+            {"number": 1,
+             "instruction": "Pour 238 g of milk."},
+            {"number": 2, "instruction": "Add sugar."}],
+        "notes": ["Use quality milk."],
+        "changes_summary": "Renamed milk."}
+
+
+def test_apply_corrections_restores_names_and_prose():
+    """Audited renames and text edits apply exactly once."""
+    parsed = _correction_parsed()
+    before = copy.deepcopy(parsed)
+    corrected, applied = \
+        revision_mod.apply_deterministic_corrections(
+            parsed,
+            [("Whole milk",
+              "Opaque white liquid (milk-like)")],
+            [("method", 1, "238 g of milk",
+              "238 g of opaque white liquid (milk-like)"),
+             ("notes", 0, "quality milk",
+              "quality ingredients"),
+             ("changes_summary", None, "Renamed milk",
+              "Restored observed names")])
+    assert parsed == before
+    assert corrected["ingredients"][0]["name"] == \
+        "Opaque white liquid (milk-like)"
+    assert corrected["ingredients"][1]["name"] == "Sugar"
+    assert "opaque white liquid" in \
+        corrected["method"][0]["instruction"]
+    assert corrected["method"][1]["instruction"] == \
+        "Add sugar."
+    assert corrected["notes"] == ["Use quality ingredients."]
+    assert corrected["changes_summary"] == \
+        "Restored observed names."
+    assert len(applied) == 4
+
+
+def test_apply_corrections_rejects_ambiguous_match():
+    """Zero or duplicate matches abort instead of half-applying."""
+    parsed = _correction_parsed()
+    with pytest.raises(revision_mod.RevisionError,
+                       match="matches 0 rows"):
+        revision_mod.apply_deterministic_corrections(
+            parsed, [("Missing", "Other")], [])
+    parsed["ingredients"].append(
+        {"name": "Whole milk", "quantity": 10.0, "unit": "g"})
+    with pytest.raises(revision_mod.RevisionError,
+                       match="matches 2 rows"):
+        revision_mod.apply_deterministic_corrections(
+            parsed, [("Whole milk", "Other")], [])
+
+
+def _substitution_parsed() -> dict[str, Any]:
+    """Free-text substitution: milk slot becomes dark chocolate."""
+    return {
+        "title": "Cinnamon Rolls",
+        "ingredients": [
+            {"name": "sugar", "quantity": 100.0, "unit": "g"},
+            {"name": "dark chocolate chips", "quantity": 80.0,
+             "unit": "g"}],
+        "method": [{"number": 1,
+                    "instruction": "Mix with dark chocolate."}],
+        "notes": ["n1"],
+        "changes_summary": "Substituted milk with chocolate."}
+
+
+def test_free_text_substitution_replaces_in_place():
+    """Same-count substitution needs no selected suggestion."""
+    recipe = copy.deepcopy(SNAPSHOT)
+    revised = revision_mod.validate_revision(
+        recipe, _substitution_parsed(), True, [])
+    snapshot = revision_mod.assemble_version(
+        recipe, revised, {
+            "recipe_id": "demo_v2_r1",
+            "parent_id": "demo_v2",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "language": "en", "instructions": "Replace the "
+            "milk with dark chocolate chips.",
+            "suggestions": [],
+            "allow_ingredient_changes": True})
+    rows = snapshot["ingredients"]
+    assert len(rows) == 2
+    assert rows[1]["name"] == "dark chocolate chips"
+    assert rows[1]["quantity"] == 80.0
+    assert rows[1]["quantity_status"] == "ai_estimated"
+    assert "chef authorization" in \
+        rows[1]["quantity_basis"].lower() \
+        or "chef correction" in rows[1]["quantity_basis"]
+    assert "Displayed" not in rows[1]["quantity_basis"]
+    assert rows[0] == SNAPSHOT["ingredients"][0]
+    assert recipe == SNAPSHOT
+
+
+def test_free_text_substitution_route_mocked(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Instructions-only revision persists a replaced row."""
+    root = _seed(tmp_path / "runs_api")
+    create_record(root, "Cinnamon Rolls", "en",
+                  recipe_id="demo_v2")
+    client = _patched_client(
+        monkeypatch, root, _substitution_parsed())
+    response = client.post("/api/recipes/demo_v2/revise",
+                           json={
+                               "instructions": "Replace the "
+                               "milk with dark chocolate chips.",
+                               "suggestions": [],
+                               "allow_ingredient_changes": True,
+                               "confirmed": True})
+    assert response.status_code == 201
+    rows = response.json()["recipe"]["ingredients"]
+    assert len(rows) == 2
+    assert rows[1]["name"] == "dark chocolate chips"
+    assert rows[0]["name"] == "sugar"
+    parent = json.loads((root / "recipes" / "demo_v2"
+                         / "snapshot.json").read_text(
+                             encoding="utf-8"))
+    assert parent == SNAPSHOT
+
+
+def test_free_text_append_instead_of_replace_rejected():
+    """Appending a duplicate without a suggestion fails."""
+    revised = _substitution_parsed()
+    revised["ingredients"] = [
+        {"name": "sugar", "quantity": 100.0, "unit": "g"},
+        {"name": "milk", "quantity": 240.0, "unit": "g"},
+        {"name": "dark chocolate chips", "quantity": 80.0,
+         "unit": "g"}]
+    with pytest.raises(revision_mod.RevisionError,
+                       match="unsupported addition"):
+        revision_mod.validate_revision(
+            copy.deepcopy(SNAPSHOT), revised, True, [])
+
+
+def test_apply_corrections_rejects_bad_text_target():
+    """Out-of-range or missing spans abort the correction."""
+    parsed = _correction_parsed()
+    with pytest.raises(revision_mod.RevisionError,
+                       match="out of range"):
+        revision_mod.apply_deterministic_corrections(
+            parsed, [], [("method", 9, "x", "y")])
+    with pytest.raises(revision_mod.RevisionError,
+                       match="matches 0 text spans"):
+        revision_mod.apply_deterministic_corrections(
+            parsed, [], [("notes", 0, "absent", "y")])
+    with pytest.raises(revision_mod.RevisionError,
+                       match="Unknown correction target"):
+        revision_mod.apply_deterministic_corrections(
+            parsed, [], [("title", None, "T", "U")])

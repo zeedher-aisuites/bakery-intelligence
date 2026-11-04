@@ -19,6 +19,7 @@ import {
   fetchReviewBundle,
   fetchRecipe,
   listRecipes,
+  renameRecipe,
 } from "./api";
 import type { RecipeDraft } from "./results";
 import {
@@ -62,6 +63,133 @@ function recipeLanguageLabel(language: string): string {
   return language === "es" ? "Español" : "English";
 }
 
+function versionKindLabel(item: RecipeCard): string {
+  return item.parent_version === null ? "Original" : "Chef Revision";
+}
+
+function groupFamilies(items: RecipeCard[]): RecipeCard[][] {
+  const groups = new Map<string, RecipeCard[]>();
+  for (const item of items) {
+    const key = item.family_id ?? item.recipe_id;
+    const group = groups.get(key);
+    if (group) group.push(item);
+    else groups.set(key, [item]);
+  }
+  const families = [...groups.values()];
+  for (const family of families) {
+    family.sort((a, b) =>
+      (b.version_number ?? 0) - (a.version_number ?? 0));
+  }
+  families.sort((a, b) =>
+    (b[0]?.updated_at ?? "").localeCompare(a[0]?.updated_at ?? ""));
+  return families;
+}
+
+function RenameControl(props: {
+  recipeId: string;
+  current: string;
+  onRenamed: (recipeId: string, displayName: string) => void;
+}): JSX.Element {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(props.current);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function begin(event: React.MouseEvent): void {
+    event.stopPropagation();
+    setValue(props.current);
+    setError(null);
+    setEditing(true);
+  }
+
+  function cancel(): void {
+    if (saving) return;
+    setEditing(false);
+    setError(null);
+  }
+
+  async function save(): Promise<void> {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      setError("Name cannot be empty.");
+      return;
+    }
+    if (trimmed.length > 120) {
+      setError("Name must be 120 characters or fewer.");
+      return;
+    }
+    if (trimmed === props.current) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await renameRecipe(props.recipeId, trimmed);
+      props.onRenamed(
+        props.recipeId, result.display_name ?? trimmed);
+      setEditing(false);
+    } catch (err: unknown) {
+      setError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className="btn-ghost rename-btn"
+        aria-label={`Rename ${props.current}`}
+        onClick={begin}
+      >
+        Rename
+      </button>
+    );
+  }
+  return (
+    <span
+      className="rename-editor"
+      onClick={(event) => event.stopPropagation()}
+    >
+      <input
+        // eslint-disable-next-line jsx-a11y/no-autofocus
+        autoFocus
+        type="text"
+        value={value}
+        maxLength={120}
+        disabled={saving}
+        aria-label="Recipe name"
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") void save();
+          else if (event.key === "Escape") cancel();
+        }}
+      />
+      <button
+        type="button"
+        className="btn-primary btn-sm"
+        disabled={saving}
+        onClick={() => void save()}
+      >
+        {saving ? "Saving…" : "Save"}
+      </button>
+      <button
+        type="button"
+        className="btn-ghost btn-sm"
+        disabled={saving}
+        onClick={cancel}
+      >
+        Cancel
+      </button>
+      {error !== null && (
+        <span className="error small" role="alert">{error}</span>
+      )}
+    </span>
+  );
+}
+
 function Landing(props: {
   onNewAnalysis: () => void;
   onOpenRecipe: (recipeId: string) => void;
@@ -81,10 +209,18 @@ function Landing(props: {
     return () => { cancelled = true; };
   }, []);
 
+  function handleRenamed(recipeId: string, displayName: string): void {
+    setItems((rows) => rows === null ? rows : rows.map((row) =>
+      row.recipe_id === recipeId
+        ? { ...row, display_name: displayName, has_custom_name: true }
+        : row));
+  }
+
   if (error) return <p className="error">{error}</p>;
   if (items === null) {
     return <p className="muted">Loading recipes…</p>;
   }
+  const families = groupFamilies(items);
   return (
     <div className="landing">
       <section className="hero">
@@ -151,27 +287,90 @@ function Landing(props: {
         <section aria-label="Your recipes">
           <h2>Your Recipes</h2>
           <ul className="run-list">
-            {items.map((item) => (
-              <li key={item.recipe_id}>
-                <button
-                  type="button"
-                  onClick={() => props.onOpenRecipe(item.recipe_id)}
-                >
-                  <strong>{item.name}</strong>
-                  <span className="muted small">
-                    {recipeLanguageLabel(item.language)}
-                    {" · "}
-                    {fmtDate(item.updated_at ?? undefined)}
+            {families.map((family) => {
+              const latest = family[0];
+              const older = family.slice(1);
+              const renderRow = (item: RecipeCard) => (
+                <li key={item.recipe_id}>
+                  <button
+                    type="button"
+                    className="version-row"
+                    onClick={() =>
+                      props.onOpenRecipe(item.recipe_id)}
+                  >
+                    <strong>{item.display_name}</strong>
+                    <span className="muted small">
+                      {`Version ${item.version_number}`}
+                      {" · "}
+                      {versionKindLabel(item)}
+                      {item.is_latest ? " · Latest" : ""}
+                      {item.parent_version_number !== null
+                        ? ` · Based on Version `
+                          + `${item.parent_version_number}`
+                        : ""}
+                    </span>
+                    <span className="muted small">
+                      {recipeLanguageLabel(item.language)}
+                      {" · "}
+                      {fmtDate(item.updated_at ?? undefined)}
+                    </span>
+                    <span className="stat-row small">
+                      <span>
+                        {item.ingredients} ingredients
+                      </span>
+                      <span>{item.steps} steps</span>
+                      <span>
+                        {recipeStatusLabel(item.status)}
+                      </span>
+                    </span>
+                  </button>
+                  <span className="version-actions">
+                    <RenameControl
+                      recipeId={item.recipe_id}
+                      current={item.display_name}
+                      onRenamed={handleRenamed}
+                    />
                   </span>
-                  <span className="stat-row small">
-                    <span>{item.ingredients} ingredients</span>
-                    <span>{item.steps} steps</span>
-                    <span>{recipeStatusLabel(item.status)}</span>
-                  </span>
-                  <span className="btn-ghost">View Recipe</span>
-                </button>
-              </li>
-            ))}
+                </li>
+              );
+              return (
+                <li key={latest.family_id} className="family-card">
+                  <div className="family-head">
+                    <div>
+                      <strong>{latest.display_name}</strong>
+                      <span className="muted small">
+                        {family.length === 1
+                          ? "Version 1"
+                          : `${family.length} versions`}
+                        {" · Latest: Version "
+                          }{latest.version_number}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      onClick={() =>
+                        props.onOpenRecipe(latest.recipe_id)}
+                    >
+                      View Recipe
+                    </button>
+                  </div>
+                  <ul className="family-versions">
+                    {renderRow(latest)}
+                  </ul>
+                  {older.length > 0 && (
+                    <details className="family-history">
+                      <summary>
+                        {`Version history (${older.length})`}
+                      </summary>
+                      <ul className="family-versions">
+                        {older.map(renderRow)}
+                      </ul>
+                    </details>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}

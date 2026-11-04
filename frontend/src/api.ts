@@ -575,6 +575,9 @@ export interface ProposedRecipe {
   run_name: string;
   recipe_id?: string;
   recipe_name?: string | null;
+  display_name?: string | null;
+  has_custom_name?: boolean;
+  version_info?: RecipeVersionInfo | null;
   language?: string;
   parent_version?: string | null;
   parent_name?: string | null;
@@ -651,9 +654,16 @@ export function recipeExportUrl(
 export interface RecipeCard {
   recipe_id: string;
   name: string;
+  display_name: string;
+  has_custom_name: boolean;
   language: string;
   source_run_id: string | null;
   parent_version: string | null;
+  parent_version_number: number | null;
+  family_id: string;
+  family_size: number;
+  version_number: number;
+  is_latest: boolean;
   created_at: string | null;
   updated_at: string | null;
   ingredients: number;
@@ -661,6 +671,24 @@ export interface RecipeCard {
   has_snapshot: boolean;
   status: string;
   build_error?: string | null;
+}
+
+export interface RecipeVersionMember {
+  recipe_id: string;
+  version_number: number;
+  display_name: string;
+  status: string;
+  parent_version: string | null;
+}
+
+export interface RecipeVersionInfo {
+  family_id: string;
+  family_size: number;
+  version_number: number;
+  is_latest: boolean;
+  parent_version: string | null;
+  parent_version_number: number | null;
+  members: RecipeVersionMember[];
 }
 
 export async function listRecipes(): Promise<RecipeCard[]> {
@@ -731,4 +759,25 @@ export async function reviseRecipe(
   });
   if (!response.ok) throw new ApiError(response.status, await parseError(response));
   return (await response.json()) as RevisionResult;
+}
+
+export interface RenameResult {
+  recipe_id: string;
+  display_name: string | null;
+  has_custom_name: boolean;
+  name: string | null;
+  updated_at: string | null;
+}
+
+export async function renameRecipe(
+  recipeId: string,
+  name: string | null,
+): Promise<RenameResult> {
+  const response = await fetch(`${API_BASE}/api/recipes/${recipeId}/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!response.ok) throw new ApiError(response.status, await parseError(response));
+  return (await response.json()) as RenameResult;
 }

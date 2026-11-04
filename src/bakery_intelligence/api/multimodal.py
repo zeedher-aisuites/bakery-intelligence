@@ -30,6 +30,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +63,7 @@ from bakery_intelligence.phase2c.media import (
     cut_subclip,
     extract_wav,
     read_json,
+    split_wav,
     write_json,
 )
 
@@ -72,6 +75,14 @@ BASETEN_KEY_VAR = "BASETEN_API_KEY"
 ASR_MODEL = "muse-voice-transcribe-1.0"
 
 SEGMENT_SECONDS = 30.0
+# Voice Transcribe rejects audio over 600 s. Chunks stay
+# comfortably below the limit; 330 s keeps a 10-11 minute
+# video to two provider calls.
+ASR_CHUNK_SECONDS = 330.0
+ASR_PROVIDER_LIMIT_SECONDS = 600.0
+# Non-frame Meta calls: global (1) + speech claims (1) +
+# validation (1) + one transcribe call per audio chunk.
+NON_FRAME_BASE_CALLS = 3
 GLOBAL_MAX_TOKENS = 16384
 # Verified live: the deployment consumes output budget on
 # unexposed reasoning (finish=length, 4096/4096 tokens, empty
@@ -82,12 +93,29 @@ SPEECH_MAX_TOKENS = 8192
 # 10 s clip (reasoning + content exceed the budget).
 VALIDATION_MAX_TOKENS = 8192
 FUSION_MAX_TOKENS = 16384
-# Chef-requested revision: one bounded call, same headroom
-# rationale as the segment/validation budgets.
-REVISION_MAX_TOKENS = 8192
+# Chef-requested revision: one bounded call. Verified live:
+# 8192 was exhausted by unexposed reasoning (finish=length,
+# 8192/8192 output tokens, zero content bytes), while the
+# same deployment completed full-recipe outputs twice at
+# 16384 (fusion peaked at 8921 content tokens). Revision
+# emits the same full-recipe shape, so it shares the fusion
+# budget instead of the smaller segment one.
+REVISION_MAX_TOKENS = 16384
 # Meta calls beyond frames: global + speech claims + validation
-# + one ASR request counted conservatively as a request.
+# + one ASR request per audio chunk (chunking is mandatory
+# past the provider duration limit).
 EXTRA_META_CALLS = 4
+
+
+def non_frame_reserve(duration_seconds: float) -> int:
+    """Meta calls reserved beyond frame inference.
+
+    4 for short audio (single transcribe call), plus one per
+    extra 330 s audio chunk. The frontend mirrors this
+    formula when it builds the grant.
+    """
+    return NON_FRAME_BASE_CALLS + len(
+        asr_chunk_windows(duration_seconds))
 
 # Per-1M-token rates are Meta-published; Baseten Spark Open
 # pricing is provider-reported only, so Baseten cost stays an
@@ -129,9 +157,31 @@ class StageCall:
         }
 
 
+_ILLEGAL_JSON_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _prep_json_text(text: str) -> str:
+    """Strip fences and illegal literal control characters.
+
+    Providers occasionally emit raw control bytes inside long
+    string fields; JSON forbids them unescaped, so removing
+    them recovers the intended document. Tab, LF, and CR are
+    legal and preserved. Anything else still fails loudly.
+    """
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines)
+    return _ILLEGAL_JSON_CONTROLS.sub("", cleaned)
+
+
 def parse_json_strict(text: str, what: str) -> Any:
     try:
-        return json.loads(text)
+        return json.loads(_prep_json_text(text))
     except ValueError as exc:
         raise MultimodalError(
             f"{what} returned non-JSON output: "
@@ -145,20 +195,66 @@ def parse_json_tolerant(text: str, what: str) -> Any:
     contract is prompt text plus fence-stripping. Anything else
     fails the stage loudly.
     """
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        cleaned = "\n".join(lines)
     try:
-        return json.loads(cleaned)
+        return json.loads(_prep_json_text(text))
     except ValueError as exc:
         raise MultimodalError(
             f"{what} returned non-JSON output: "
             f"{text[:200]!r}") from exc
+
+
+def _reuse_json(work_dir: Path, name: str,
+                required: tuple[str, ...]
+                ) -> dict[str, Any] | None:
+    """Load a persisted stage output, or None to run it.
+
+    Recovery never repeats a billable stage whose output is
+    already on disk and structurally valid. Anything missing
+    or malformed reruns the stage instead of failing.
+    """
+    path = work_dir / name
+    if not path.is_file():
+        return None
+    try:
+        stored = read_json(path)
+    except ValueError:
+        return None
+    if not isinstance(stored, dict):
+        return None
+    for key in required:
+        if stored.get(key) is None:
+            return None
+    return stored
+
+
+def _reuse_segments(mm_dir: Path) -> tuple[
+        dict[str, Any], list[dict[str, Any]]] | None:
+    """Load a complete persisted segment set, else None.
+
+    All-or-nothing: a partial set reruns the whole segment
+    stage rather than mixing fresh and stale records.
+    """
+    index = _reuse_json(
+        mm_dir, "segments_index.json",
+        ("segments", "count"))
+    if index is None or not isinstance(
+            index.get("segments"), list):
+        return None
+    records = []
+    try:
+        for entry in index["segments"]:
+            record = _reuse_json(
+                mm_dir,
+                f"segment_{entry['index']:03d}.json",
+                ("result",))
+            if record is None:
+                return None
+            records.append(record)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if len(records) != index.get("count"):
+        return None
+    return index, records
 
 
 def write_stage_failure(work_dir: Path, name: str,
@@ -167,9 +263,32 @@ def write_stage_failure(work_dir: Path, name: str,
 
     A failed parse must never force a blind repeat: the
     request id, usage, finish state, and content head/tail
-    stay on disk for inspection.
+    stay on disk for inspection. When a new attempt fails
+    after a previous one, the older file (and its full-text
+    sidecar, if any) is renamed with its request id instead
+    of being overwritten, so every billable attempt stays
+    inspectable.
     """
-    write_json(work_dir / f"{name}_failed.json", detail)
+    path = work_dir / f"{name}_failed.json"
+    try:
+        if path.is_file():
+            old = json.loads(path.read_bytes())
+            old_id = old.get("request_id") \
+                if isinstance(old, dict) else None
+            if (isinstance(old_id, str) and old_id
+                    and old_id != detail.get("request_id")):
+                safe = "".join(
+                    c if c.isalnum() or c in "-_" else "_"
+                    for c in old_id)[:64]
+                path.rename(
+                    work_dir / f"{name}_{safe}_failed.json")
+                txt = work_dir / f"{name}_failed.txt"
+                if txt.is_file():
+                    txt.rename(
+                        work_dir / f"{name}_{safe}_failed.txt")
+    except (OSError, ValueError):
+        pass
+    write_json(path, detail)
 
 
 def baseten_model_id() -> str:
@@ -196,9 +315,13 @@ class BasetenClient:
         if not key:
             raise MultimodalError(
                 f"Missing {BASETEN_KEY_VAR}; refusing Baseten calls.")
+        # No SDK retries: every Baseten call is an explicit,
+        # operator-visible single request. A transport failure
+        # surfaces immediately instead of burning hidden
+        # duplicate billable attempts.
         self._client = OpenAI(
             base_url=BASETEN_BASE_URL, api_key=key,
-            timeout=timeout_seconds,
+            timeout=timeout_seconds, max_retries=0,
             http_client=None if transport is None else transport)
         self._model = baseten_model_id()
 
@@ -378,21 +501,37 @@ def _spark_tokens(usage: dict[str, Any]) -> tuple[int, int]:
 
 
 def frame_stage_calls(
-        firstpass: dict[str, Any]) -> list[StageCall]:
+        firstpass: dict[str, Any],
+        resumed: bool = False) -> list[StageCall]:
     """Aggregate Path A usage into one cost-report call.
 
     The first-pass report already carries token totals and a
     rate-based estimate; surfacing them here keeps the
     multimodal cost report honest instead of hiding the
-    dominant frame spend behind a pointer.
+    dominant frame spend behind a pointer. A resumed run
+    records 0.0 new spend: the pipeline core verified prior
+    outputs without billing.
     """
     def num(value: Any) -> int:
         return value if isinstance(value, int) and value >= 0 else 0
 
     estimate = firstpass.get("cost_usd_estimated")
+    status = "ok"
+    new_estimate: float | None = None
+    error: str | None = None
+    if resumed:
+        status, new_estimate, error = (
+            "reused", 0.0, None)
+    elif (isinstance(estimate, (int, float))
+          and not isinstance(estimate, bool)):
+        status, new_estimate, error = (
+            "ok", float(estimate), None)
+    else:
+        status, new_estimate, error = (
+            "ok", None, "usage in firstpass_report.json")
     return [StageCall(
         stage="frames_firstpass", provider="meta",
-        model=SPARK_MODEL, request_id=None, status="ok",
+        model=SPARK_MODEL, request_id=None, status=status,
         elapsed_seconds=0.0,
         usage={
             "input_tokens": num(
@@ -404,13 +543,8 @@ def frame_stage_calls(
             "batches_completed": num(
                 firstpass.get("batches_completed")),
         },
-        estimate_usd=(float(estimate)
-                      if isinstance(estimate, (int, float))
-                      and not isinstance(estimate, bool)
-                      else None),
-        error=(None if isinstance(estimate, (int, float))
-               and not isinstance(estimate, bool)
-               else "usage in firstpass_report.json"))]
+        estimate_usd=new_estimate,
+        error=error)]
 
 
 def run_global_stage(meta: MetaResponsesClient,
@@ -500,6 +634,152 @@ def has_audio_stream(video_path: Path) -> bool:
     return bool(completed.stdout.strip())
 
 
+def asr_chunk_windows(duration_seconds: float,
+                      window: float = ASR_CHUNK_SECONDS
+                      ) -> list[tuple[float, float]]:
+    """Contiguous [start, end) windows covering the audio.
+
+    Contiguous (not overlapping) by design: no transcript
+    segment can be duplicated, and no audio is skipped. A
+    word straddling the exact boundary may be split across
+    two chunk transcripts; chunks are transcribed
+    independently and never reworded.
+    """
+    if duration_seconds <= 0:
+        raise MultimodalError("Cannot chunk zero-length audio.")
+    windows = []
+    start = 0.0
+    while start < duration_seconds:
+        windows.append((start, min(start + window,
+                                   duration_seconds)))
+        start += window
+    return windows
+
+
+def merge_transcripts(
+        duration_seconds: float,
+        chunk_payloads: list[tuple[float, dict[str, Any]]]
+        ) -> dict[str, Any]:
+    """Merge chunk transcripts onto the absolute timeline.
+
+    Turn timestamps shift by their chunk offset; turn ids are
+    reassigned sequentially. The single-call schema
+    (transcript text, turns, audioDurationMs, sessionId) is
+    preserved, with chunk provenance added.
+    """
+    turns: list[dict[str, Any]] = []
+    texts: list[str] = []
+    sessions: list[Any] = []
+    elapsed = 0.0
+    turn_id = 0
+    for start, payload in chunk_payloads:
+        offset_ms = int(round(start * 1000))
+        chunk_turns = payload.get("turns")
+        if not isinstance(chunk_turns, list):
+            raise MultimodalError(
+                f"ASR chunk at {start:.1f}s has no turns list.")
+        for turn in chunk_turns:
+            if not isinstance(turn, dict):
+                raise MultimodalError(
+                    f"ASR chunk at {start:.1f}s has a "
+                    "non-object turn.")
+            merged_turn = dict(turn)
+            for key in ("startMs", "endMs"):
+                value = turn.get(key)
+                if isinstance(value, bool) or not isinstance(
+                        value, (int, float)):
+                    raise MultimodalError(
+                        f"ASR chunk at {start:.1f}s has a "
+                        f"turn without numeric {key}.")
+                merged_turn[key] = int(value) + offset_ms
+            merged_turn["turnId"] = turn_id
+            turn_id += 1
+            turns.append(merged_turn)
+        text = payload.get("transcript")
+        if isinstance(text, str) and text.strip():
+            texts.append(text.strip())
+        sessions.append(payload.get("sessionId"))
+        extra = payload.get("_elapsed_seconds")
+        if isinstance(extra, (int, float)) and not isinstance(
+                extra, bool):
+            elapsed += float(extra)
+    return {
+        "audioDurationMs": int(round(duration_seconds * 1000)),
+        "sessionId": sessions[0] if sessions else None,
+        "transcript": " ".join(texts),
+        "turns": turns,
+        "chunked": len(chunk_payloads) > 1,
+        "chunk_seconds": ASR_CHUNK_SECONDS,
+        "chunk_session_ids": sessions,
+        "_elapsed_seconds": round(elapsed, 3),
+    }
+
+
+def _valid_chunk_record(stored: Any) -> dict[str, Any] | None:
+    """Return a persisted chunk payload, or None to redo it."""
+    if not isinstance(stored, dict):
+        return None
+    payload = stored.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if not isinstance(payload.get("turns"), list):
+        return None
+    if not isinstance(stored.get("start_seconds"),
+                      (int, float)):
+        return None
+    return payload
+
+
+def _reused_audio_calls(
+        transcript: dict[str, Any],
+        claims: dict[str, Any]) -> list[StageCall]:
+    """Rebuilt cost calls for reused audio outputs.
+
+    Reused stages record 0.0 new spend with their original
+    usage and request ids preserved, so a resumed run never
+    bills or double-counts them.
+    """
+    calls: list[StageCall] = []
+    chunks = transcript.get("chunks")
+    if isinstance(chunks, list) and chunks:
+        for position, entry in enumerate(chunks):
+            if not isinstance(entry, dict):
+                continue
+            index = entry.get("index")
+            if not isinstance(index, int):
+                index = position
+            start = entry.get("start_seconds")
+            end = entry.get("end_seconds")
+            if not isinstance(start, (int, float)):
+                start = 0.0
+            if not isinstance(end, (int, float)):
+                end = start
+            calls.append(StageCall(
+                stage="audio_transcribe_chunk_"
+                      f"{index:03d}",
+                provider="meta", model=ASR_MODEL,
+                request_id=entry.get("request_id"),
+                status="reused", elapsed_seconds=0.0,
+                usage={"audio_seconds": round(
+                    max(0.0, float(end) - float(start)), 3)},
+                estimate_usd=0.0))
+    else:
+        calls.append(StageCall(
+            stage="audio_transcribe", provider="meta",
+            model=ASR_MODEL,
+            request_id=transcript.get("request_id"),
+            status="reused", elapsed_seconds=0.0,
+            usage={}, estimate_usd=0.0))
+    usage = _usage_of(claims)
+    calls.append(StageCall(
+        stage="speech_claims", provider="meta",
+        model=SPARK_MODEL,
+        request_id=claims.get("request_id"),
+        status="reused", elapsed_seconds=0.0,
+        usage=usage, estimate_usd=0.0))
+    return calls
+
+
 def run_audio_stage(meta: MetaResponsesClient,
                     asr: VoiceTranscribeClient,
                     video_path: Path,
@@ -516,28 +796,110 @@ def run_audio_stage(meta: MetaResponsesClient,
                    "reason": "no audio stream in source"}
         write_json(work_dir / "transcript.json", skipped)
         return None, None, []
+    stored_transcript = _reuse_json(
+        work_dir, "transcript.json", ("turns",))
+    stored_claims = _reuse_json(
+        work_dir, "speech_claims.json", ("result",))
+    if (stored_transcript is not None
+            and stored_claims is not None):
+        return (stored_transcript, stored_claims,
+                _reused_audio_calls(
+                    stored_transcript, stored_claims))
     wav_path = work_dir / "audio.wav"
-    extract_wav(video_path, wav_path)
-    started = time.monotonic()
-    transcript = asr.transcribe(wav_path, mode="DIARIZATION")
-    elapsed = time.monotonic() - started
-    if not isinstance(transcript, dict):
-        raise MultimodalError("ASR returned a non-object payload.")
-    write_json(work_dir / "transcript.json", transcript)
+    if not (wav_path.is_file()
+            and wav_path.stat().st_size > 0):
+        extract_wav(video_path, wav_path)
     duration = float(probe.get("duration_seconds") or 0.0)
-    calls = [StageCall(
-        stage="audio_transcribe", provider="meta",
-        model=ASR_MODEL,
-        request_id=transcript.get("request_id"),
-        status="ok", elapsed_seconds=elapsed,
-        usage={"audio_seconds": duration},
-        estimate_usd=estimate_asr_usd(duration))]
+    if duration <= 0:
+        raise MultimodalError(
+            "Audio stage found no measurable duration.")
+    chunks_dir = work_dir / "asr_chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    windows = asr_chunk_windows(duration)
+    chunk_payloads: list[tuple[float, dict[str, Any]]] = []
+    calls: list[StageCall] = []
+    for index, (start, end) in enumerate(windows):
+        chunk_path = chunks_dir / f"chunk_{index:03d}.wav"
+        record_path = chunks_dir / f"chunk_{index:03d}.json"
+        if record_path.is_file():
+            try:
+                reused = _valid_chunk_record(
+                    read_json(record_path))
+            except ValueError:
+                reused = None
+            if reused is not None:
+                chunk_payloads.append((start, reused))
+                calls.append(StageCall(
+                    stage=f"audio_transcribe_chunk_{index:03d}",
+                    provider="meta", model=ASR_MODEL,
+                    request_id=reused.get("request_id"),
+                    status="reused", elapsed_seconds=0.0,
+                    usage={"audio_seconds": round(
+                        end - start, 3)},
+                    estimate_usd=0.0))
+                continue
+        split_wav(wav_path, start, end - start, chunk_path)
+        started = time.monotonic()
+        try:
+            payload = asr.transcribe(
+                chunk_path, mode="DIARIZATION")
+        except Exception as exc:
+            write_stage_failure(
+                work_dir, f"asr_chunk_{index:03d}", {
+                    "model": ASR_MODEL, "provider": "meta",
+                    "start_seconds": start,
+                    "end_seconds": end,
+                    "error": f"{type(exc).__name__}: "
+                             f"{str(exc)[:300]}",
+                })
+            raise MultimodalError(
+                f"ASR chunk {index} ({start:.1f}s) failed: "
+                f"{exc}") from exc
+        elapsed = time.monotonic() - started
+        if not isinstance(payload, dict):
+            raise MultimodalError(
+                f"ASR chunk {index} returned a non-object "
+                "payload.")
+        payload["_elapsed_seconds"] = round(elapsed, 3)
+        write_json(record_path, {
+            "index": index,
+            "start_seconds": start,
+            "end_seconds": end,
+            "payload": payload,
+        })
+        chunk_payloads.append((start, payload))
+        calls.append(StageCall(
+            stage=f"audio_transcribe_chunk_{index:03d}",
+            provider="meta", model=ASR_MODEL,
+            request_id=payload.get("request_id"),
+            status="ok", elapsed_seconds=elapsed,
+            usage={"audio_seconds": round(end - start, 3)},
+            estimate_usd=estimate_asr_usd(end - start)))
+    transcript = merge_transcripts(duration, chunk_payloads)
+    transcript["chunks"] = [{
+        "index": index,
+        "start_seconds": start,
+        "end_seconds": end,
+        "request_id": payload.get("request_id"),
+    } for index, ((start, end), (_, payload)) in enumerate(
+        zip(windows, chunk_payloads))]
+    write_json(work_dir / "transcript.json", transcript)
     turns = transcript.get("turns")
     if not isinstance(turns, list) or not turns:
         write_json(work_dir / "speech_claims.json",
                    {"status": "skipped",
                     "reason": "transcript has no turns"})
         return transcript, None, calls
+    claims, call = run_speech_claims(meta, turns, work_dir)
+    calls.append(call)
+    return transcript, claims, calls
+
+
+def run_speech_claims(meta: MetaResponsesClient,
+                      turns: list[Any],
+                      work_dir: Path) -> tuple[dict[str, Any],
+                                             StageCall]:
+    """Extract structured culinary claims from transcript turns."""
     prompt = prompts.SPEECH_ANALYST
     payload = meta.create_response(
         SPARK_MODEL,
@@ -552,6 +914,8 @@ def run_audio_stage(meta: MetaResponsesClient,
         parsed = parse_json_strict(text, "Speech claims")
         violations = prompts.validate_output(prompt, parsed)
     except MultimodalError as exc:
+        # Failure record first: it rotates any previous
+        # attempt's files aside before the new text lands.
         write_stage_failure(work_dir, "speech_claims", {
             "model": SPARK_MODEL, "provider": "meta",
             "request_id": payload.get("id"),
@@ -559,8 +923,11 @@ def run_audio_stage(meta: MetaResponsesClient,
             "content_length": len(text),
             "content_head": text[:2000],
             "content_tail": text[-2000:],
+            "raw_text_file": "speech_claims_failed.txt",
             "error": str(exc)[:300],
         })
+        (work_dir / "speech_claims_failed.txt").write_text(
+            text, encoding="utf-8", errors="backslashreplace")
         raise
     if violations:
         write_stage_failure(work_dir, "speech_claims", {
@@ -568,9 +935,14 @@ def run_audio_stage(meta: MetaResponsesClient,
             "request_id": payload.get("id"),
             "usage": _usage_of(payload),
             "content_length": len(text),
+            "content_head": text[:2000],
+            "content_tail": text[-2000:],
+            "raw_text_file": "speech_claims_failed.txt",
             "violations": violations,
             "error": "Invalid speech payload",
         })
+        (work_dir / "speech_claims_failed.txt").write_text(
+            text, encoding="utf-8", errors="backslashreplace")
         raise MultimodalError(
             "Invalid speech payload: " + "; ".join(violations))
     usage = _usage_of(payload)
@@ -584,15 +956,15 @@ def run_audio_stage(meta: MetaResponsesClient,
         "result": parsed,
     }
     write_json(work_dir / "speech_claims.json", claims)
-    calls.append(StageCall(
+    call = StageCall(
         stage="speech_claims", provider="meta",
         model=SPARK_MODEL, request_id=payload.get("id"),
         status="ok",
         elapsed_seconds=float(
             payload.get("_elapsed_seconds") or 0.0),
         usage=usage,
-        estimate_usd=estimate_spark_usd(in_tok, out_tok)))
-    return transcript, claims, calls
+        estimate_usd=estimate_spark_usd(in_tok, out_tok))
+    return claims, call
 
 
 def segment_windows(duration_seconds: float,
@@ -610,13 +982,64 @@ def segment_windows(duration_seconds: float,
     return windows
 
 
+def _usable_segment_record(mm_dir: Path, index: int,
+                           start: float, end: float,
+                           ) -> dict[str, Any] | None:
+    """Return a persisted segment record, or None to redo it.
+
+    A record is reusable only when its window matches, its
+    clip file is still on disk with the recorded hash, and
+    its result still validates: a resumed run must never mix
+    a fresh call chain with a stale or foreign record.
+    """
+    try:
+        record = read_json(
+            mm_dir / f"segment_{index:03d}.json")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    if record.get("index") != index:
+        return None
+    for key, want in (("start_seconds", start),
+                      ("end_seconds", end)):
+        got = record.get(key)
+        if not isinstance(got, (int, float)) or isinstance(
+                got, bool) or abs(float(got) - want) > 0.01:
+            return None
+    clip_path = mm_dir / "clips" / f"seg_{index:03d}.mp4"
+    want_sha = record.get("clip_sha256")
+    if not clip_path.is_file() or not isinstance(
+            want_sha, str):
+        return None
+    try:
+        clip_bytes = clip_path.read_bytes()
+    except OSError:
+        return None
+    if hashlib.sha256(clip_bytes).hexdigest() != want_sha:
+        return None
+    result = record.get("result")
+    if not isinstance(result, dict):
+        return None
+    if prompts.validate_output(prompts.LOCAL_ANALYST,
+                               result):
+        return None
+    return record
+
+
 def run_segment_stage(baseten: BasetenClient,
                       video_path: Path,
                       duration_seconds: float,
                       global_summary: str,
                       work_dir: Path) -> tuple[dict[str, Any],
                                                list[StageCall]]:
-    """Path C: Baseten Spark Open native-video segments."""
+    """Path C: Baseten Spark Open native-video segments.
+
+    Segments resume individually: each persisted record is
+    re-verified (window, clip hash, schema) before its call
+    is skipped, so a late failure never rebills the segments
+    that already succeeded.
+    """
     prompt = prompts.LOCAL_ANALYST
     clips_dir = work_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -626,6 +1049,25 @@ def run_segment_stage(baseten: BasetenClient,
     for index, (start, end) in enumerate(
             segment_windows(duration_seconds)):
         clip_path = clips_dir / f"seg_{index:03d}.mp4"
+        reused = _usable_segment_record(
+            work_dir, index, start, end)
+        if reused is not None:
+            segments.append(reused)
+            calls.append(StageCall(
+                stage=f"segment_{index:03d}",
+                provider="baseten",
+                model=reused.get("model")
+                or baseten.model,
+                request_id=reused.get("request_id"),
+                status="reused", elapsed_seconds=0.0,
+                usage=reused.get("usage") or {},
+                estimate_usd=None,
+                error=BASEN_COST_UNKNOWN))
+            parsed = reused["result"]
+            summary = parsed.get("summary") or parsed.get(
+                "segment_summary") or ""
+            previous_summary = str(summary)[:1500]
+            continue
         cut_subclip(video_path, start, end - start, clip_path)
         clip_bytes = clip_path.read_bytes()
         context = global_summary[:1500]
@@ -645,9 +1087,13 @@ def run_segment_stage(baseten: BasetenClient,
               "content": [{"type": "text", "text": instruction},
                           video_part(clip_bytes)]}],
             max_tokens=SEGMENT_MAX_TOKENS)
+        content = result["content"]
+        if not isinstance(content, str):
+            content = json.dumps(content, default=str)
+        result["content"] = content
         try:
             parsed = parse_json_tolerant(
-                result["content"], f"Segment {index}")
+                content, f"Segment {index}")
             violations = prompts.validate_output(prompt, parsed)
         except MultimodalError as exc:
             write_stage_failure(
@@ -662,8 +1108,14 @@ def run_segment_stage(baseten: BasetenClient,
                         result["content"]),
                     "content_head": result["content"][:2000],
                     "content_tail": result["content"][-2000:],
+                    "raw_text_file":
+                        f"segment_{index:03d}_failed.txt",
                     "error": str(exc)[:300],
                 })
+            (work_dir
+             / f"segment_{index:03d}_failed.txt").write_text(
+                result["content"], encoding="utf-8",
+                errors="backslashreplace")
             raise
         if violations:
             write_stage_failure(
@@ -676,10 +1128,18 @@ def run_segment_stage(baseten: BasetenClient,
                     "usage": result["usage"],
                     "content_length": len(
                         result["content"]),
+                    "content_head": result["content"][:2000],
+                    "content_tail": result["content"][-2000:],
+                    "raw_text_file":
+                        f"segment_{index:03d}_failed.txt",
                     "violations": violations,
                     "error": ("Invalid segment "
                               f"{index} payload"),
                 })
+            (work_dir
+             / f"segment_{index:03d}_failed.txt").write_text(
+                result["content"], encoding="utf-8",
+                errors="backslashreplace")
             raise MultimodalError(
                 f"Invalid segment {index} payload: "
                 + "; ".join(violations))
@@ -728,13 +1188,45 @@ def run_segment_stage(baseten: BasetenClient,
     return index_record, calls
 
 
+def _segment_reading_value(
+        reading: dict[str, Any]) -> float | None:
+    """Numeric display value of a segment measurement.
+
+    Prefers the structured ``value``; falls back to the
+    leading number of ``display_reading`` (e.g. "112,
+    briefly 114" -> 112.0). Unreadable displays yield
+    None and stay out of quantity grounding.
+    """
+    value = reading.get("value")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(
+            value):
+        return float(value)
+    text = reading.get("display_reading")
+    if isinstance(text, str):
+        match = re.match(r"\s*(-?\d+(?:\.\d+)?)", text)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
 def build_merged_evidence(
         firstpass_bundle: dict[str, Any],
         global_record: dict[str, Any],
         segment_records: list[dict[str, Any]],
         transcript: dict[str, Any] | None,
         claims: dict[str, Any] | None) -> dict[str, Any]:
-    """Deterministic cross-source merge with provenance."""
+    """Deterministic cross-source merge with provenance.
+
+    Segment scale measurements join the FirstPass readings
+    as ``scale_reading`` items (with their own source and
+    request id), so fusion grounding and quantity checks
+    see every recorded display value, not just Path A.
+    """
     items: list[dict[str, Any]] = []
     for reading in firstpass_bundle.get("readings") or []:
         items.append({
@@ -780,6 +1272,27 @@ def build_merged_evidence(
                       if isinstance(event, dict) else None),
                 "text": json.dumps(event)[:500]
                 if isinstance(event, dict) else str(event),
+                "model": segment.get("model"),
+                "provider": segment.get("provider"),
+                "request_id": segment.get("request_id"),
+            })
+        for reading in result.get("measurements") or []:
+            if not isinstance(reading, dict):
+                continue
+            value = _segment_reading_value(reading)
+            if value is None:
+                continue
+            stamp = reading.get("timestamp_seconds")
+            if stamp is None:
+                stamp = reading.get("timestamp")
+            items.append({
+                "source": f"segment_{segment['index']:03d}",
+                "kind": "scale_reading",
+                "t": stamp,
+                "value": value,
+                "unit": reading.get("unit"),
+                "display_reading": reading.get(
+                    "display_reading"),
                 "model": segment.get("model"),
                 "provider": segment.get("provider"),
                 "request_id": segment.get("request_id"),
@@ -848,6 +1361,9 @@ def run_fusion_stage(baseten: BasetenClient,
         [{"role": "user",
           "content": [{"type": "text", "text": instruction}]}],
         max_tokens=FUSION_MAX_TOKENS)
+    if not isinstance(result["content"], str):
+        result["content"] = json.dumps(
+            result["content"], default=str)
     try:
         parsed = parse_json_tolerant(
             result["content"], "Fusion")
@@ -860,9 +1376,16 @@ def run_fusion_stage(baseten: BasetenClient,
             "content_length": len(result["content"]),
             "content_head": result["content"][:2000],
             "content_tail": result["content"][-2000:],
+            "raw_text_file": "fusion_recipe_failed.txt",
             "error": str(exc)[:300],
         })
+        (work_dir / "fusion_recipe_failed.txt").write_text(
+            result["content"], encoding="utf-8",
+            errors="backslashreplace")
         raise
+    # Grounding covers every recorded display value: merged
+    # scale_reading items come from both the FirstPass and
+    # the segment paths.
     checks_bundle = {
         "readings": [{
             "value": item.get("value")}
@@ -928,29 +1451,65 @@ def run_revision_stage(baseten: BasetenClient,
         [{"role": "user",
           "content": [{"type": "text", "text": instruction}]}],
         max_tokens=REVISION_MAX_TOKENS)
-    try:
-        parsed = parse_json_tolerant(
-            result["content"], "Revision")
-        violations = prompts.validate_output(prompt, parsed)
-    except MultimodalError as exc:
+    content = result["content"]
+    if not isinstance(content, str):
+        content = json.dumps(content, default=str)
+    result["content"] = content
+    finish = result.get("finish_reason")
+    usage = result.get("usage") or {}
+    out_tokens = usage.get("output_tokens")
+
+    def failed(detail: dict[str, Any]) -> None:
         write_stage_failure(work_dir, "revision_raw", {
             "model": result["model"], "provider": "baseten",
             "request_id": result["id"],
-            "finish_reason": result.get("finish_reason"),
-            "usage": result["usage"],
-            "content_length": len(result["content"]),
-            "content_head": result["content"][:2000],
-            "content_tail": result["content"][-2000:],
+            "finish_reason": finish,
+            "usage": usage,
+            "content_length": len(content),
+            "content_head": content[:2000],
+            "content_tail": content[-2000:],
+            "raw_text_file": "revision_raw_failed.txt",
+            **detail,
+        })
+        (work_dir / "revision_raw_failed.txt").write_text(
+            content, encoding="utf-8",
+            errors="backslashreplace")
+
+    if not content.strip():
+        if finish == "length":
+            failed({
+                "failure_category": "truncated",
+                "error": "Revision output exhausted the "
+                         "token budget.",
+            })
+            raise MultimodalError(
+                f"Revision output exhausted the token "
+                f"budget (finish=length, {out_tokens} "
+                f"output tokens, request "
+                f"{result['id']}); no content to parse.")
+        failed({
+            "failure_category": "empty",
+            "error": "Revision returned empty output.",
+        })
+        raise MultimodalError(
+            f"Revision returned empty output "
+            f"(finish={finish}, request {result['id']}).")
+    try:
+        parsed = parse_json_tolerant(content, "Revision")
+        violations = prompts.validate_output(prompt, parsed)
+    except MultimodalError as exc:
+        failed({
+            "failure_category": ("truncated"
+                                 if finish == "length"
+                                 else "invalid"),
             "error": str(exc)[:300],
         })
         raise
     if violations:
-        write_stage_failure(work_dir, "revision_raw", {
-            "model": result["model"], "provider": "baseten",
-            "request_id": result["id"],
-            "finish_reason": result.get("finish_reason"),
-            "usage": result["usage"],
-            "content_length": len(result["content"]),
+        failed({
+            "failure_category": ("truncated"
+                                 if finish == "length"
+                                 else "invalid"),
             "violations": violations,
             "error": "Invalid revision payload",
         })
@@ -1017,6 +1576,8 @@ def execute_video_pipeline_multimodal(
         clients: dict[str, Any] | None = None) -> dict[str, bytes]:
     """Run every mandatory multimodal stage (no silent skips)."""
     from bakery_intelligence.api.pipeline import (
+        PIPELINE_STATE_FILENAME,
+        STAGE_FIRSTPASS_DONE,
         run_pipeline_from_path,
     )
     from bakery_intelligence.inference.meta_spark import (
@@ -1097,27 +1658,56 @@ def execute_video_pipeline_multimodal(
     # full-length video terminates the job after one call
     # instead of after hundreds of frame calls. The global
     # stage needs no frame artifacts (upload + duration only).
-    frame_budget = grant.max_requests - EXTRA_META_CALLS
+    reserve = non_frame_reserve(duration)
+    frame_budget = grant.max_requests - reserve
     if frame_budget < 1:
         raise fail("authorize", MultimodalError(
             f"Grant allows {grant.max_requests} Meta calls; "
-            f"{EXTRA_META_CALLS} are reserved for the "
-            "non-frame stages."))
+            f"{reserve} are reserved for the non-frame stages "
+            f"({duration:.1f}s audio needs "
+            f"{reserve - NON_FRAME_BASE_CALLS} ASR chunk "
+            "calls)."))
 
-    # Path B: global native video.
+    # Path B: global native video (reused when present).
     try:
-        global_record, call = run_global_stage(
-            meta, source_path, duration, mm_dir)
-        calls.append(call)
+        global_record = _reuse_json(
+            mm_dir, "global.json", ("result", "request_id"))
+        if global_record is None:
+            global_record, call = run_global_stage(
+                meta, source_path, duration, mm_dir)
+            calls.append(call)
+        else:
+            usage = _usage_of(global_record)
+            calls.append(StageCall(
+                stage="global", provider="meta",
+                model=global_record.get("model")
+                or SPARK_MODEL,
+                request_id=global_record.get("request_id"),
+                status="reused", elapsed_seconds=0.0,
+                usage=usage, estimate_usd=0.0))
     except Exception as exc:
         raise fail("global", exc)
     meta_used = 1
 
-    # Path A: frames + first-pass + reconstruction (reused).
+    # Path A: frames + first-pass + reconstruction.
     # Same contract as execute_video_pipeline_meta, except the
     # frame runner is capped below the grant so the audio and
     # validation stages keep their reserved calls (global
-    # already ran).
+    # already ran). When the prior pipeline stage reached
+    # firstpass_done, the core only re-verifies existing
+    # outputs, so this run issues zero new frame calls.
+    try:
+        state_path = work_root / PIPELINE_STATE_FILENAME
+        frames_resumed = False
+        if state_path.is_file():
+            try:
+                prior = json.loads(state_path.read_bytes())
+            except (OSError, ValueError):
+                prior = {}
+            frames_resumed = (isinstance(prior, dict) and prior.get(
+                "stage") == STAGE_FIRSTPASS_DONE)
+    except Exception as exc:
+        raise fail("frames", exc)
     try:
         frame_client = clients.get("frames") or MetaSparkClient(
             model=grant.model,
@@ -1143,9 +1733,10 @@ def execute_video_pipeline_multimodal(
         frames_used = int(firstpass.get("requests_sent") or 0)
     except Exception as exc:
         raise fail("frames", exc)
-    calls.extend(frame_stage_calls(firstpass))
+    calls.extend(frame_stage_calls(
+        firstpass, resumed=frames_resumed))
     meta_used += frames_used
-    remaining = EXTRA_META_CALLS - 1  # audio (2) + validation
+    remaining = reserve - 1  # global already ran
     if meta_used + remaining > grant.max_requests:
         raise fail("authorize", MultimodalError(
             f"Grant allows {grant.max_requests} Meta calls; "
@@ -1163,14 +1754,32 @@ def execute_video_pipeline_multimodal(
     except Exception as exc:
         raise fail("audio", exc)
 
-    # Path C: Baseten segments.
+    # Path C: Baseten segments (reused when complete).
     try:
         global_summary = json.dumps(
             global_record.get("result") or {})[:2000]
-        segments_index, segment_calls = run_segment_stage(
-            baseten, source_path, duration, global_summary,
-            mm_dir)
-        calls.extend(segment_calls)
+        reused_segments = _reuse_segments(mm_dir)
+        if reused_segments is None:
+            segments_index, segment_calls = (
+                run_segment_stage(
+                    baseten, source_path, duration,
+                    global_summary, mm_dir))
+            calls.extend(segment_calls)
+        else:
+            segments_index, segment_records = reused_segments
+            for record in segment_records:
+                calls.append(StageCall(
+                    stage=f"segment_{record.get('index', 0):03d}"
+                    if isinstance(record.get("index"), int)
+                    else "segment_unk",
+                    provider="baseten",
+                    model=record.get("model")
+                    or BASETEN_MODEL,
+                    request_id=record.get("request_id"),
+                    status="reused", elapsed_seconds=0.0,
+                    usage=record.get("usage") or {},
+                    estimate_usd=None,
+                    error=BASEN_COST_UNKNOWN))
     except Exception as exc:
         raise fail("segments", exc)
 
@@ -1202,34 +1811,59 @@ def execute_video_pipeline_multimodal(
     except Exception as exc:
         raise fail("merge", exc)
 
-    # Evidence validation (configurable adapter).
+    # Evidence validation (reused when present).
     try:
-        validation = validator.validate(merged, mm_dir)
-        write_json(mm_dir / "validation.json", validation)
-        usage = validation.get("usage") or {}
-        in_tok, out_tok = _spark_tokens(usage)
+        validation = _reuse_json(
+            mm_dir, "validation.json",
+            ("result", "model", "provider"))
+        if validation is None:
+            validation = validator.validate(merged, mm_dir)
+            write_json(mm_dir / "validation.json",
+                       validation)
+            status = "ok"
+            usage = validation.get("usage") or {}
+            in_tok, out_tok = _spark_tokens(usage)
+            estimate = estimate_spark_usd(in_tok, out_tok) \
+                if validation.get("provider") == "meta" \
+                else None
+        else:
+            status = "reused"
+            usage = _usage_of(validation)
+            estimate = 0.0
         calls.append(StageCall(
             stage="validation",
             provider=validation.get("provider") or "meta",
             model=validation.get("model") or SPARK_MODEL,
             request_id=validation.get("request_id"),
-            status="ok",
+            status=status,
             elapsed_seconds=float(
                 validation.get("elapsed_seconds") or 0.0),
             usage=usage,
-            estimate_usd=estimate_spark_usd(in_tok, out_tok)
-            if validation.get("provider") == "meta" else None))
+            estimate_usd=estimate))
         if validation.get("provider") == "meta":
             meta_used += 1
     except Exception as exc:
         raise fail("validation", exc)
 
-    # Fusion → proposal-schema recipe draft.
+    # Fusion → proposal-schema recipe draft (reused if present).
     try:
-        fusion_record, fusion_call = run_fusion_stage(
-            baseten, merged, validation, recipe_name,
-            language, mm_dir)
-        calls.append(fusion_call)
+        fusion_record = _reuse_json(
+            mm_dir, "fusion_recipe.json", ("result",))
+        if fusion_record is None:
+            fusion_record, fusion_call = run_fusion_stage(
+                baseten, merged, validation, recipe_name,
+                language, mm_dir)
+            calls.append(fusion_call)
+        else:
+            calls.append(StageCall(
+                stage="fusion", provider="baseten",
+                model=fusion_record.get("model")
+                or BASETEN_MODEL,
+                request_id=fusion_record.get("request_id"),
+                status="reused", elapsed_seconds=0.0,
+                usage=fusion_record.get("usage") or {},
+                estimate_usd=None,
+                error=BASEN_COST_UNKNOWN))
     except Exception as exc:
         raise fail("fusion", exc)
 

@@ -4,9 +4,18 @@ export const META_MODEL = "muse-spark-1.3";
 export const META_WORKFLOW = "video_pipeline_multimodal";
 export const OFFLINE_WORKFLOW = "video_pipeline_offline";
 export const TOKEN_BUDGET = 4096;
-// Extra Meta calls beyond one-per-frame: global video, audio,
-// validation. Mirrors EXTRA_META_CALLS in multimodal.py.
-export const EXTRA_META_REQUESTS = 4;
+// Extra Meta calls beyond one-per-frame: global, speech
+// claims, validation (3) plus one transcribe call per
+// 330 s audio chunk. Mirrors non_frame_reserve in
+// multimodal.py. Frames approximate seconds at 1 FPS.
+export const ASR_CHUNK_SECONDS = 330;
+export const NON_FRAME_BASE_CALLS = 3;
+
+export function extraMetaRequests(frames: number): number {
+  const chunks = Math.max(
+    1, Math.ceil(Math.max(1, Math.floor(frames)) / ASR_CHUNK_SECONDS));
+  return NON_FRAME_BASE_CALLS + chunks;
+}
 export const MAX_AUTHORIZED_COST_USD = 20;
 export const RATES_USD_PER_M: [number, number] = [1.25, 4.25];
 
@@ -58,7 +67,7 @@ export function buildMetaGrant(
   now: Date = new Date(),
 ): MetaGrant {
   const safeFrames = Math.max(1, Math.floor(frames));
-  const maxRequests = safeFrames + EXTRA_META_REQUESTS;
+  const maxRequests = safeFrames + extraMetaRequests(safeFrames);
   return {
     grant_format: "bakery-billable-grant/1",
     workflow: META_WORKFLOW,

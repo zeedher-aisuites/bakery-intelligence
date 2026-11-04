@@ -312,7 +312,7 @@ def validate_proposal(bundle: dict[str, Any],
             raise ProposalError("A suggestion is not an object.")
         slug = _clean(item.get("id"))
         if not slug or len(slug) > 40 or not re.fullmatch(
-                r"[a-z0-9][a-z0-9-]*", slug):
+                r"[a-z0-9][a-z0-9_-]*", slug):
             raise ProposalError(
                 "Suggestion ids must be lowercase slugs.")
         if slug in seen_slugs:

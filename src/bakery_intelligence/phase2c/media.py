@@ -57,6 +57,20 @@ def cut_subclip(source: Path, start: float, duration: float,
     return dest
 
 
+def split_wav(source: Path, start: float, duration: float,
+              dest: Path) -> Path:
+    """Cut one WAV segment with re-encoded timestamps."""
+    if duration <= 0:
+        raise MediaError("WAV segment duration must be positive.")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    run_ffmpeg(["-ss", f"{start:.3f}", "-i", str(source),
+                "-t", f"{duration:.3f}", "-c:a", "pcm_s16le",
+                str(dest)])
+    if not dest.is_file() or dest.stat().st_size == 0:
+        raise MediaError(f"WAV segment extraction failed: {dest}.")
+    return dest
+
+
 def grab_frame(source: Path, at_seconds: float,
                dest: Path) -> Path:
     """Grab one frame at a container timestamp (VFR-safe)."""

@@ -13,6 +13,67 @@ const POLL_MS = 2500;
 
 type Phase = "loading" | "analysis" | "building" | "ready" | "failed";
 
+function VersionBanner(props: {
+  card: RecipeCard;
+  rows: RecipeCard[];
+  onSelectRecipe: (recipeId: string) => void;
+}): JSX.Element {
+  const { card } = props;
+  const members = props.rows
+    .filter((row) => row.family_id === card.family_id)
+    .sort((a, b) => a.version_number - b.version_number);
+  const parent = card.parent_version === null ? null : {
+    id: card.parent_version,
+    number: card.parent_version_number,
+  };
+  return (
+    <div className="rc-version-banner">
+      <span className="rc-version-label">
+        {`Version ${card.version_number} of ${card.family_size}`}
+        {card.parent_version === null
+          ? " — Original"
+          : ` — Based on Version ${card.parent_version_number}`}
+        {!card.is_latest ? " — Previous Version" : ""}
+      </span>
+      {parent !== null && (
+        <button
+          type="button"
+          className="rc-btn rc-btn-link"
+          onClick={() => props.onSelectRecipe(parent.id)}
+        >
+          {parent.number === null
+            ? "Open parent version"
+            : `Open Version ${parent.number}`}
+        </button>
+      )}
+      {members.length > 1 && (
+        <details className="rc-version-history">
+          <summary>Version History</summary>
+          <ul>
+            {members.map((member) => (
+              <li key={member.recipe_id}>
+                <button
+                  type="button"
+                  className="rc-btn rc-btn-link"
+                  disabled={member.recipe_id === card.recipe_id}
+                  onClick={() =>
+                    props.onSelectRecipe(member.recipe_id)}
+                >
+                  {`Version ${member.version_number} — `
+                    + `${member.display_name}`}
+                  {member.recipe_id === card.recipe_id
+                    ? " (current)"
+                    : ""}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
 export default function RecipeWorkspace(props: {
   recipeId: string | null;
   onSelectRecipe: (recipeId: string) => void;
@@ -21,6 +82,7 @@ export default function RecipeWorkspace(props: {
   const [card, setCard] = useState<RecipeCard | null | undefined>(
     undefined,
   );
+  const [rows, setRows] = useState<RecipeCard[]>([]);
   const [phase, setPhase] = useState<Phase>("loading");
   const [detail, setDetail] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<string | null>(null);
@@ -44,6 +106,7 @@ export default function RecipeWorkspace(props: {
       .then((rows) => {
         if (cancelled) return;
         const found = rows.find((row) => row.recipe_id === target) ?? null;
+        setRows(rows);
         setCard(found);
         if (found === null) {
           setPhase("failed");
@@ -179,7 +242,9 @@ export default function RecipeWorkspace(props: {
       {phase === "failed" && card !== null && card !== undefined && (
         <div className="rc-doc">
           <p className="rc-kicker">Something went wrong</p>
-          <h2 className="rc-title">{card.name}</h2>
+          <h2 className="rc-title">
+            {card.display_name ?? card.name}
+          </h2>
           <p className="rc-error" role="alert">
             {detail ?? "Recipe generation failed."}
           </p>
@@ -208,7 +273,9 @@ export default function RecipeWorkspace(props: {
         card !== undefined && (
           <div className="rc-doc">
             <p className="rc-kicker">AI processing</p>
-            <h2 className="rc-title">{card.name}</h2>
+            <h2 className="rc-title">
+              {card.display_name ?? card.name}
+            </h2>
             <p className="muted">
               {phase === "analysis"
                 ? `Analyzing your video${
@@ -224,11 +291,18 @@ export default function RecipeWorkspace(props: {
           </div>
         )}
       {phase === "ready" && card?.has_snapshot && (
-        <RecipeEditor
-          key={target}
-          recipeId={target}
-          onNewVersion={(nextId) => props.onSelectRecipe(nextId)}
-        />
+        <>
+          <VersionBanner
+            card={card}
+            rows={rows}
+            onSelectRecipe={props.onSelectRecipe}
+          />
+          <RecipeEditor
+            key={target}
+            recipeId={target}
+            onNewVersion={(nextId) => props.onSelectRecipe(nextId)}
+          />
+        </>
       )}
     </section>
   );

@@ -315,6 +315,12 @@ class RecipeReviseSubmission(BaseModel):
     confirmed: bool = False
 
 
+class RecipeRenameSubmission(BaseModel):
+    """Per-version display-name override; null clears it."""
+
+    name: str | None = None
+
+
 def sanitize_filename(filename: str | None) -> str:
     """Derive a safe storage object id from a client filename."""
     stem = (filename or "upload").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
@@ -396,13 +402,58 @@ def _revision_evidence(root: Path,
     return evidence
 
 
+def _fusion_checks_bundle(bundle: dict[str, Any],
+                          run_dir: Path) -> dict[str, Any]:
+    """Validation bundle with merged multimodal readings.
+
+    The pipeline validates the fusion draft against merged
+    evidence (FirstPass plus segment displays); the build
+    re-check must use the same grounding set or it rejects
+    quantities the pipeline already validated. A missing or
+    unreadable merge falls back to the FirstPass-only
+    bundle.
+    """
+    path = (run_dir / "artifacts"
+            / "multimodal_merged.json")
+    if not path.is_file():
+        return bundle
+    try:
+        merged = media.read_json(path)
+    except (OSError, ValueError):
+        return bundle
+    if not isinstance(merged, dict):
+        return bundle
+    extra = [{
+        "value": item.get("value")}
+        for item in merged.get("items") or []
+        if isinstance(item, dict)
+        and item.get("kind") == "scale_reading"
+        and isinstance(item.get("value"), (int, float))
+        and not isinstance(item.get("value"), bool)]
+    if not extra:
+        return bundle
+    return {**bundle, "readings": [
+        *(bundle.get("readings") or []), *extra]}
+
+
 def _next_version_id(root: Path, parent_id: str) -> str:
-    """First free sibling id: <parent>_r1, <parent>_r2, ..."""
+    """First free sibling id: <parent>_r1, <parent>_r2, ...
+
+    A directory counts as taken only when it holds a record
+    or snapshot (the same definition list_recipes uses), so
+    a failed attempt's diagnostics-only directory is reused
+    by the retry instead of stranding a numbered gap.
+    """
     base = root / "recipes"
     suffix = 1
-    while (base / f"{parent_id}_r{suffix}").exists():
+    while True:
+        candidate = base / f"{parent_id}_r{suffix}"
+        if not candidate.is_dir():
+            return f"{parent_id}_r{suffix}"
+        if not (candidate / "record.json").is_file() and not (
+                candidate / "snapshot.json").is_file():
+            return f"{parent_id}_r{suffix}"
         suffix += 1
-    return f"{parent_id}_r{suffix}"
 
 
 def build_app(storage: StorageBackend | None = None,
@@ -1205,14 +1256,17 @@ def build_app(storage: StorageBackend | None = None,
                 status_code=422,
                 detail="Revision requires explicit confirmation.")
         instructions = (submission.instructions or "").strip()
-        if not instructions:
-            raise HTTPException(
-                status_code=422,
-                detail="Revision instructions must not be empty.")
         if len(instructions) > 2000:
             raise HTTPException(
                 status_code=422,
                 detail="Revision instructions exceed 2000 characters.")
+        valued = [item for item in submission.suggestions
+                  if item.selected and (item.value or "").strip()]
+        if not instructions and not valued:
+            raise HTTPException(
+                status_code=422,
+                detail="Revision needs instructions or at least "
+                       "one selected suggestion with a value.")
         root = _review_root()
         try:
             recipe = merged_recipe(root, recipe_id)
@@ -1237,69 +1291,95 @@ def build_app(storage: StorageBackend | None = None,
             unresolved_questions=unresolved,
             evidence=_revision_evidence(
                 root, record.get("source_run_id")))
-        new_id = _next_version_id(root, recipe_id)
-        out_dir = recipe_dir(root, new_id)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        ledger = BudgetLedger.load(
-            root / "phase2c" / "ledger.json")
-        try:
-            client = BasetenClient()
-        except Exception as exc:  # noqa: BLE001 - surfaced
-            raise HTTPException(status_code=502,
-                                detail=str(exc)[:300])
-        try:
-            stored, _call = run_revision_stage(
-                client, bundle, out_dir)
-        except Exception as exc:  # noqa: BLE001 - surfaced
-            raise HTTPException(
-                status_code=502,
-                detail=f"Revision model call failed: "
-                       f"{str(exc)[:300]}")
-        try:
-            revised = revision_mod.validate_revision(
-                recipe, stored.get("parsed"),
-                submission.allow_ingredient_changes)
-        except revision_mod.RevisionError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
         from datetime import datetime, timezone
 
-        generated_at = datetime.now(timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ")
-        snapshot = revision_mod.assemble_version(recipe, revised, {
-            "recipe_id": new_id,
-            "parent_id": recipe_id,
-            "generated_at": generated_at,
-            "language": language,
-            "instructions": instructions,
-            "suggestions": selected,
-            "allow_ingredient_changes":
-            submission.allow_ingredient_changes,
-            "provider": stored.get("provider"),
-            "model": stored.get("model"),
-            "request_id": stored.get("request_id"),
-            "actual_usd": None,
+        parent_dir = recipe_dir(root, recipe_id)
+        lock_path = parent_dir / "revising.lock"
+        if lock_path.is_file():
+            try:
+                lock = json.loads(lock_path.read_text(
+                    encoding="utf-8"))
+                started = datetime.fromisoformat(
+                    lock.get("started_at", ""))
+                age = (datetime.now(timezone.utc)
+                       - started).total_seconds()
+            except (OSError, ValueError):
+                age = 1e12
+            if age < 600:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Revision already in progress.")
+        media.write_json(lock_path, {
+            "started_at": datetime.now(timezone.utc).isoformat(),
         })
-        media.write_json(out_dir / "snapshot.json", snapshot)
-        create_record(root, record.get("name")
-                      or recipe.get("title") or new_id,
-                      language, source_run_id=record.get(
-                          "source_run_id"), parent_version=recipe_id,
-                      recipe_id=new_id)
-        ledger.record({
-            "label": f"revision/{recipe_id}/{new_id}",
-            "provider": stored.get("provider"),
-            "model": stored.get("model"),
-            "estimate_usd": None,
-            "actual_usd": None,
-            "request_id": stored.get("request_id"),
-        })
-        return {"recipe_id": new_id,
-                "parent_version": recipe_id,
+        try:
+            new_id = _next_version_id(root, recipe_id)
+            out_dir = recipe_dir(root, new_id)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ledger = BudgetLedger.load(
+                root / "phase2c" / "ledger.json")
+            try:
+                client = BasetenClient()
+            except Exception as exc:  # noqa: BLE001 - surfaced
+                raise HTTPException(status_code=502,
+                                    detail=str(exc)[:300])
+            try:
+                stored, _call = run_revision_stage(
+                    client, bundle, out_dir)
+            except Exception as exc:  # noqa: BLE001 - surfaced
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Revision model call failed: "
+                           f"{str(exc)[:300]}")
+            try:
+                revised = revision_mod.validate_revision(
+                    recipe, stored.get("parsed"),
+                    submission.allow_ingredient_changes,
+                    selected)
+            except revision_mod.RevisionError as exc:
+                raise HTTPException(
+                    status_code=422, detail=str(exc))
+            generated_at = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            snapshot = revision_mod.assemble_version(
+                recipe, revised, {
+                    "recipe_id": new_id,
+                    "parent_id": recipe_id,
+                    "generated_at": generated_at,
+                    "language": language,
+                    "instructions": instructions,
+                    "suggestions": selected,
+                    "allow_ingredient_changes":
+                    submission.allow_ingredient_changes,
+                    "provider": stored.get("provider"),
+                    "model": stored.get("model"),
+                    "request_id": stored.get("request_id"),
+                    "actual_usd": None,
+                })
+            media.write_json(out_dir / "snapshot.json", snapshot)
+            create_record(root, record.get("name")
+                          or recipe.get("title") or new_id,
+                          language, source_run_id=record.get(
+                              "source_run_id"),
+                          parent_version=recipe_id,
+                          recipe_id=new_id)
+            ledger.record({
+                "label": f"revision/{recipe_id}/{new_id}",
                 "provider": stored.get("provider"),
                 "model": stored.get("model"),
-                "request_id": stored.get("request_id"),
+                "estimate_usd": None,
                 "actual_usd": None,
-                "recipe": merged_recipe(root, new_id)}
+                "request_id": stored.get("request_id"),
+            })
+            return {"recipe_id": new_id,
+                    "parent_version": recipe_id,
+                    "provider": stored.get("provider"),
+                    "model": stored.get("model"),
+                    "request_id": stored.get("request_id"),
+                    "actual_usd": None,
+                    "recipe": merged_recipe(root, new_id)}
+        finally:
+            lock_path.unlink(missing_ok=True)
 
     @app.post("/api/recipes/{recipe_id}/build", status_code=200)
     def build_recipe(recipe_id: str) -> dict[str, Any]:
@@ -1397,9 +1477,11 @@ def build_app(storage: StorageBackend | None = None,
                 prompt_version = fusion_record.get(
                     "prompt_version")
                 request_id = fusion_record.get("request_id")
+                checks = _fusion_checks_bundle(
+                    bundle, run_dir)
                 try:
                     parsed = proposal_mod.validate_proposal(
-                        bundle, fusion_record["result"])
+                        checks, fusion_record["result"])
                 except proposal_mod.ProposalError as exc:
                     media.write_json(
                         out_dir / "build_error.json", {
@@ -1563,6 +1645,33 @@ def build_app(storage: StorageBackend | None = None,
             raise HTTPException(status_code=422, detail=str(exc))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
+
+    @app.post("/api/recipes/{recipe_id}/rename", status_code=200)
+    def rename_recipe_route(
+            recipe_id: str,
+            submission: RecipeRenameSubmission) -> dict[str, Any]:
+        """Rename one version; metadata only, no new version."""
+        from bakery_intelligence.api.recipe_editor import \
+            rename_recipe
+
+        root = _review_root()
+        try:
+            record = rename_recipe(
+                root, recipe_id, submission.name)
+        except RecipeEditorError as exc:
+            message = str(exc)
+            if message.startswith("Unknown recipe:"):
+                raise HTTPException(status_code=404,
+                                    detail=message)
+            raise HTTPException(status_code=422, detail=message)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"recipe_id": recipe_id,
+                "display_name": record.get("display_name"),
+                "has_custom_name": bool(
+                    (record.get("display_name") or "").strip()),
+                "name": record.get("name"),
+                "updated_at": record.get("updated_at")}
 
     @app.get("/api/recipes/{recipe_id}/export.pdf")
     def export_recipe_pdf(recipe_id: str) -> Response:

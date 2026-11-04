@@ -199,12 +199,15 @@ def list_recipes(root: Path) -> list[dict[str, Any]]:
                         or detail.get("error")
                         or "Recipe generation failed.")
                     break
+        snap_title = None
         if snapshot_path.is_file():
             try:
                 snapshot = json.loads(
                     snapshot_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 snapshot = {}
+            if isinstance(snapshot, dict):
+                snap_title = snapshot.get("title")
             card["ingredients"] = len(
                 snapshot.get("ingredients") or [])
             card["steps"] = len(snapshot.get("method") or [])
@@ -217,11 +220,153 @@ def list_recipes(root: Path) -> list[dict[str, Any]]:
                     card["updated_at"] = editor["last_saved_at"]
             except RecipeEditorError:
                 card["status"] = "draft"
+        display, custom = effective_display_name(
+            record if isinstance(record, dict) else {},
+            snap_title)
+        if not display:
+            display = child.name
+        card["display_name"] = display
+        card["has_custom_name"] = custom
         cards.append(card)
     cards.sort(key=lambda c: (c.get("updated_at") or "",
                               c.get("created_at") or "",
                               c["recipe_id"]), reverse=True)
+    overlay_lineage(cards)
     return cards
+
+
+def effective_display_name(
+        record: dict[str, Any] | None,
+        snapshot_title: Any = None) -> tuple[str, bool]:
+    """User override, else request name, else snapshot title.
+
+    Returns (name, has_custom_name). Snapshots are never
+    consulted for writing; renames live in record.json only.
+    """
+    record = record if isinstance(record, dict) else {}
+    custom = record.get("display_name")
+    if isinstance(custom, str) and custom.strip():
+        return custom.strip(), True
+    name = record.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip(), False
+    if isinstance(snapshot_title, str) and snapshot_title.strip():
+        return snapshot_title.strip(), False
+    recipe_id = record.get("recipe_id")
+    if isinstance(recipe_id, str) and recipe_id:
+        return recipe_id, False
+    return "", False
+
+
+def group_families(
+        cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group cards by persisted lineage; number versions 1..N.
+
+    Pure function over card dicts (recipe_id, parent_version,
+    created_at). Missing parents and lineage cycles degrade to
+    singleton families instead of merging unrelated recipes.
+    Numbers follow creation order (created_at, recipe_id).
+    """
+    by_id = {c["recipe_id"]: c for c in cards}
+
+    def root_of(start: str) -> str:
+        seen: set[str] = set()
+        current = start
+        while True:
+            if current in seen:
+                return start
+            seen.add(current)
+            parent = by_id.get(current, {}).get(
+                "parent_version")
+            if not parent or parent not in by_id:
+                return current
+            current = parent
+
+    members: dict[str, list[dict[str, Any]]] = {}
+    for card in cards:
+        members.setdefault(root_of(card["recipe_id"]),
+                           []).append(card)
+    families: list[dict[str, Any]] = []
+    for root, group in members.items():
+        ordered = sorted(
+            group,
+            key=lambda c: (c.get("created_at") or "",
+                           c["recipe_id"]))
+        numbers = {c["recipe_id"]: n + 1
+                   for n, c in enumerate(ordered)}
+        families.append({
+            "family_id": root,
+            "family_size": len(ordered),
+            "members": [{
+                "recipe_id": c["recipe_id"],
+                "version_number": numbers[c["recipe_id"]],
+                "parent_version": c.get("parent_version"),
+                "parent_version_number": numbers.get(
+                    c.get("parent_version") or ""),
+            } for c in ordered],
+        })
+    families.sort(
+        key=lambda f: (ordered_key(f, by_id)), reverse=True)
+    return families
+
+
+def ordered_key(family: dict[str, Any],
+                by_id: dict[str, dict[str, Any]]) -> tuple:
+    """Newest-member-first ordering for families."""
+    latest = family["members"][-1]["recipe_id"]
+    card = by_id.get(latest, {})
+    return (card.get("updated_at") or "",
+            card.get("created_at") or "", latest)
+
+
+def overlay_lineage(cards: list[dict[str, Any]]) -> None:
+    """Attach family/version/display fields to cards in place."""
+    index: dict[str, dict[str, Any]] = {}
+    for family in group_families(cards):
+        for member in family["members"]:
+            index[member["recipe_id"]] = {
+                "family_id": family["family_id"],
+                "family_size": family["family_size"],
+                "version_number":
+                member["version_number"],
+                "parent_version_number":
+                member["parent_version_number"],
+                "is_latest": member["version_number"]
+                == family["family_size"],
+            }
+    for card in cards:
+        card.update(index.get(card["recipe_id"], {
+            "family_id": card["recipe_id"],
+            "family_size": 1,
+            "version_number": 1,
+            "parent_version_number": None,
+            "is_latest": True,
+        }))
+
+
+def rename_recipe(root: Path, recipe_id: str,
+                  name: Any) -> dict[str, Any]:
+    """Set or clear a per-version display-name override.
+
+    Metadata only: no new version, no inference, snapshots
+    untouched. ``None`` clears the override; anything else
+    must be a 1-120 character string after trimming.
+    """
+    _validated_id(recipe_id)
+    record = read_record(root, recipe_id)
+    if record is None:
+        raise RecipeEditorError(
+            f"Unknown recipe: {recipe_id!r}.")
+    if name is None:
+        record.pop("display_name", None)
+        record["updated_at"] = utc_now()
+        write_record(root, recipe_id, record)
+        return record
+    record["display_name"] = _clean_text(
+        name, MAX_RECIPE_NAME_CHARS, "Recipe name")
+    record["updated_at"] = utc_now()
+    write_record(root, recipe_id, record)
+    return record
 
 
 def read_snapshot(root: Path, recipe_id: str) -> dict[str, Any]:
@@ -321,7 +466,43 @@ def merged_recipe(root: Path, recipe_id: str) -> dict[str, Any]:
     else:
         recipe["improvement_suggestions"] = [
             dict(item) for item in IMPROVEMENT_SUGGESTIONS]
+    display, custom = effective_display_name(
+        record, snapshot.get("title"))
+    recipe["display_name"] = display or recipe.get("title")
+    recipe["has_custom_name"] = custom
+    recipe["version_info"] = version_info_for(root, recipe_id)
     return recipe
+
+
+def version_info_for(root: Path,
+                     recipe_id: str) -> dict[str, Any]:
+    """Family position and navigable history for one recipe."""
+    cards = {c["recipe_id"]: c for c in list_recipes(root)}
+    current = cards.get(recipe_id, {})
+    family_id = current.get("family_id") or recipe_id
+    members = sorted(
+        (c for c in cards.values()
+         if (c.get("family_id") or c["recipe_id"])
+         == family_id),
+        key=lambda c: (c.get("version_number") or 0,
+                       c["recipe_id"]))
+    return {
+        "family_id": family_id,
+        "family_size": current.get("family_size") or 1,
+        "version_number": current.get("version_number") or 1,
+        "is_latest": bool(current.get("is_latest", True)),
+        "parent_version": current.get("parent_version"),
+        "parent_version_number": current.get(
+            "parent_version_number"),
+        "members": [{
+            "recipe_id": c["recipe_id"],
+            "version_number": c.get("version_number") or 1,
+            "display_name": c.get("display_name")
+            or c["recipe_id"],
+            "status": c.get("status") or "draft",
+            "parent_version": c.get("parent_version"),
+        } for c in members],
+    }
 
 
 def _clean_text(value: Any, maximum: int, label: str) -> str:

@@ -245,3 +245,99 @@ def test_v2_guidance_requires_known_steps():
     ])
     assert method[0]["ai_guidance"]["provenance"] == "ai_estimated"
     assert len(open_items) == 1
+
+
+def _pdf_snapshot(ingredients, method=None, language="es"):
+    return {
+        "snapshot_id": "pdf-test",
+        "title": "Roles de Canela XL",
+        "recipe_status": "draft",
+        "language": language,
+        "ingredients": ingredients,
+        "method": method or [],
+        "limitations": [],
+    }
+
+
+def _pdf_row(name, quantity=100.0, unit="g",
+             status="seen_video"):
+    return {"name": name, "quantity": quantity,
+            "unit": unit, "quantity_status": status,
+            "quantity_basis": "Stable display.",
+            "evidence": []}
+
+
+def test_pdf_row_height_grows_with_wrapping():
+    pdf = pdf_mod.RecipePDF("doc")
+    pdf.add_page()
+    short = pdf_mod.row_height(
+        pdf, ["Flour", "100", "g", "Seen in video"])
+    assert short == 6.0
+    long_name = ("Líquido blanco opaco en bol metálico "
+                 "grande con apariencia de leche fresca")
+    tall = pdf_mod.row_height(
+        pdf, [long_name, "238", "g", "Visto en el video"])
+    assert tall > short
+    assert tall % 6.0 == 0.0
+    detail = ("La báscula mostró 699 g; se mencionaron "
+              "700 g en el audio durante el pesaje.")
+    with_detail = pdf_mod.row_height(
+        pdf, ["Flour", "100", "g", "Seen in video"],
+        detail=detail)
+    assert with_detail > short
+
+
+def _word_bands(page, names):
+    """Vertical band per ingredient name from word boxes."""
+    words = page.get_text("words")
+    bands = []
+    for name in names:
+        parts = name.split()
+        first, last = parts[0], parts[-1]
+        tops = [w[1] for w in words if w[4] == first]
+        bottoms = [w[3] for w in words if w[4] == last]
+        assert tops and bottoms, name
+        bands.append((min(tops), max(bottoms)))
+    return bands
+
+
+def test_pdf_long_names_do_not_overlap(tmp_path):
+    names = [
+        "Alfa polvo blanco finísimo para tangzhong",
+        "Bravo líquido transparente de recipiente azul",
+        "Charlie cubos sólidos pálidos de grasa",
+    ]
+    shot = _pdf_snapshot([_pdf_row(name) for name in names])
+    target = tmp_path / "wrap.pdf"
+    target.write_bytes(pdf_mod.build_pdf(shot))
+    import pymupdf
+    with pymupdf.open(target) as doc:
+        assert doc.page_count == 1
+        bands = _word_bands(doc[0], names)
+    for (_, bottom), (top, _) in zip(bands, bands[1:]):
+        assert top >= bottom, bands
+
+
+def test_pdf_multipage_spanish_unicode(tmp_path):
+    ingredients = [
+        _pdf_row(f"Ingrediente número {n} con descripción "
+                 f"larga以上的 ñandú y azúcar glasé",
+                 quantity=None, unit=None,
+                 status="ai_estimated")
+        for n in range(40)
+    ]
+    method = [{"number": n + 1, "clip_id": "uploaded_video",
+               "instruction": f"Mezcle el ingrediente {n} "
+                              f"con cuidado y hornee."}
+              for n in range(16)]
+    shot = _pdf_snapshot(ingredients, method)
+    target = tmp_path / "long.pdf"
+    target.write_bytes(pdf_mod.build_pdf(shot))
+    import pymupdf
+    with pymupdf.open(target) as doc:
+        assert doc.page_count >= 2
+        text = "\n".join(page.get_text() for page in doc)
+    assert "Ingrediente número 39" in text
+    assert "azúcar glasé" in text
+    assert "Sugerido por IA" in text
+    assert "Mezcle el ingrediente 15" in text

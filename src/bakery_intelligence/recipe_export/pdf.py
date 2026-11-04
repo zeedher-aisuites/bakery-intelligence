@@ -114,12 +114,46 @@ class RecipePDF(FPDF):
         self.ln(1)
 
 
+INGREDIENT_WIDTHS = [68, 32, 18, 48]
+_ROW_LINE_H = 6.0
+_DETAIL_LINE_H = 5.0
+
+
+def wrapped_lines(pdf: RecipePDF, width: float, text: str,
+                  style: str = "", size: int = 10) -> list[str]:
+    """Dry-run line wrap for one table cell (no drawing)."""
+    pdf.set_font("Helvetica", style, size)
+    lines = pdf.multi_cell(width, _ROW_LINE_H, text,
+                           dry_run=True, output="LINES")
+    return lines if lines else [""]
+
+
+def row_height(pdf: RecipePDF, cells: list[str],
+               detail: str | None = None) -> float:
+    """Measured row height for wrapped cells + detail note."""
+    styles = ["B", "", "", ""]
+    main = max(len(wrapped_lines(pdf, width, text, style))
+               for width, text, style in zip(
+                   INGREDIENT_WIDTHS, cells, styles))
+    total = main * _ROW_LINE_H
+    if detail:
+        span = sum(INGREDIENT_WIDTHS[1:])
+        total += len(wrapped_lines(
+            pdf, span, detail, "I", 8)) * _DETAIL_LINE_H
+    return total
+
+
 def render_ingredients(pdf: RecipePDF,
                        ingredients: list[dict[str, Any]],
                        language: str) -> None:
-    """Clean table: name, quantity, unit, source."""
+    """Clean table: name, quantity, unit, source.
+
+    Each row is measured before it is drawn, so wrapped
+    names grow the row instead of overlapping the next one;
+    a row that does not fit moves to the next page whole.
+    """
     labels = TEXT[language]
-    widths = [62, 34, 22, 48]
+    widths = INGREDIENT_WIDTHS
     pdf.set_font("Helvetica", "B", 9)
     pdf.set_fill_color(*INK)
     pdf.set_text_color(*WHITE)
@@ -130,36 +164,48 @@ def render_ingredients(pdf: RecipePDF,
     pdf.ln()
     pdf.set_text_color(*INK)
     for position, row in enumerate(ingredients):
-        fill = position % 2 == 1
-        if fill:
-            pdf.set_fill_color(*CREAM)
-        pdf.set_font("Helvetica", "B", 10)
+        striped = position % 2 == 1
         qty = fmt_amount(row.get("quantity"), language)
         detail = adjustment_note(row, language)
         cells = [sanitize(row.get("name")), qty,
                  sanitize(row.get("unit")) or "-",
                  sanitize(row_source(row, language))]
-        height = 12 if detail else 7
-        x_start = pdf.get_x()
+        styles = ["B", "", "", ""]
+        counts = [len(wrapped_lines(pdf, width, text, style))
+                  for width, text, style in zip(
+                      widths, cells, styles)]
+        main_h = max(counts) * _ROW_LINE_H
+        detail_h = 0.0
+        if detail:
+            detail_h = len(wrapped_lines(
+                pdf, sum(widths[1:]), sanitize(detail),
+                "I", 8)) * _DETAIL_LINE_H
+        height = main_h + detail_h
         y_start = pdf.get_y()
         if y_start + height > pdf.page_break_trigger:
             pdf.add_page()
             y_start = pdf.get_y()
-        for width, text in zip(widths, cells):
+        if striped:
+            pdf.set_fill_color(*CREAM)
+            pdf.rect(pdf.l_margin, y_start, sum(widths),
+                     height, style="F")
+        x_start = pdf.l_margin
+        for width, text, style in zip(widths, cells, styles):
             pdf.set_xy(x_start, y_start)
-            pdf.set_font("Helvetica",
-                         "B" if width == widths[0] else "", 10)
-            pdf.multi_cell(width, 7 if height == 7 else 6, text,
-                           border=0, fill=fill)
+            pdf.set_font("Helvetica", style, 10)
+            pdf.set_text_color(*INK)
+            pdf.multi_cell(width, _ROW_LINE_H, text,
+                           border=0)
             x_start += width
         if detail:
-            pdf.set_x(pdf.l_margin + widths[0])
+            pdf.set_xy(pdf.l_margin + widths[0],
+                       y_start + main_h)
             pdf.set_font("Helvetica", "I", 8)
             pdf.set_text_color(*MUTED)
-            pdf.multi_cell(widths[1] + widths[2] + widths[3], 5,
-                           sanitize(detail), fill=fill)
+            pdf.multi_cell(sum(widths[1:]), _DETAIL_LINE_H,
+                           sanitize(detail), border=0)
             pdf.set_text_color(*INK)
-        pdf.set_xy(pdf.l_margin, max(pdf.get_y(), y_start + 7))
+        pdf.set_xy(pdf.l_margin, y_start + height)
     pdf.ln(2)
 
 
@@ -222,6 +268,22 @@ def render_bullets(pdf: RecipePDF, items: list[str]) -> None:
     pdf.ln(2)
 
 
+def version_line(snapshot: dict[str, Any]) -> str:
+    """English version designation for the document header."""
+    info = snapshot.get("version_info")
+    number = info.get("version_number") if isinstance(
+        info, dict) else None
+    if not isinstance(number, int):
+        number = None if snapshot.get("parent_version") else 1
+    if snapshot.get("parent_version"):
+        kind = "Chef Revision"
+    else:
+        kind = "Original"
+    if number is None:
+        return kind
+    return f"Version {number} - {kind}"
+
+
 def build_pdf(snapshot: dict[str, Any]) -> bytes:
     """Render the full document; returns the PDF bytes."""
     language = lang_of(snapshot)
@@ -236,8 +298,15 @@ def build_pdf(snapshot: dict[str, Any]) -> bytes:
              new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "B", 26)
     pdf.set_text_color(*INK)
-    pdf.multi_cell(0, 11, sanitize(snapshot.get("title")),
-                     new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(
+        0, 11,
+        sanitize(snapshot.get("display_name")
+                 or snapshot.get("title")),
+        new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_text_color(*TERRA)
+    pdf.cell(0, 6, sanitize(version_line(snapshot)),
+             new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "I", 10)
     pdf.set_text_color(*MUTED)
     pdf.multi_cell(0, 5.5, sanitize(labels["subtitle"]),
@@ -255,8 +324,14 @@ def build_pdf(snapshot: dict[str, Any]) -> bytes:
         f"{labels['col_source']}: {snapshot.get('snapshot_id')}",
         f"Status: {status_label}",
     ]
-    if snapshot.get("parent_version"):
-        meta.append(f"Based on: {snapshot.get('parent_version')}")
+    parent = snapshot.get("parent_version")
+    if parent:
+        info = snapshot.get("version_info") or {}
+        number = info.get("parent_version_number")
+        if isinstance(number, int):
+            meta.append(f"Based on Version {number}")
+        else:
+            meta.append(f"Based on: {parent}")
     y = pdf.get_y()
     pdf.set_xy(pdf.l_margin, y)
     for line in meta:

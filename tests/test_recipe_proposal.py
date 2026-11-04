@@ -163,6 +163,20 @@ def test_validate_proposal_shape_rules(tmp_path: Path):
         proposal_mod.validate_proposal(bundle, bad)
 
 
+def test_validate_proposal_accepts_snake_case_slug(tmp_path: Path):
+    run_dir = tmp_path / "runs" / "run_x"
+    _seed_run(run_dir)
+    bundle = proposal_mod.build_evidence_bundle(run_dir, "T", "en")
+    # Live fusion emits snake_case ids; they are opaque React
+    # keys and selection-map keys, so underscores are safe.
+    parsed = proposal_mod.validate_proposal(bundle, _parsed(
+        suggestions=[{
+            "id": "water_amount", "label": "Add water amount",
+            "hint": "Liters for the pot.",
+            "placeholder": "4 liters"}]))
+    assert parsed["suggestions"][0]["id"] == "water_amount"
+
+
 def test_validate_non_meaningful(tmp_path: Path):
     run_dir = tmp_path / "runs" / "run_x"
     _seed_run(run_dir)
@@ -451,3 +465,46 @@ def test_build_endpoint_rejects_invalid_fusion(
     assert calls["count"] == 0
     assert (root / "recipes" / recipe_id / "build_error.json"
             ).is_file()
+
+
+def test_build_endpoint_grounds_fusion_in_merged_readings(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Build re-check uses pipeline grounding, not FirstPass-only.
+
+    Regression: the pipeline validated a segment-recorded
+    238 g, but /build re-checked against FirstPass readings
+    only and rejected the same draft with 422.
+    """
+    client, run_id, recipe_id, calls = _client_with_job(
+        tmp_path, "completed", monkeypatch, _parsed())
+    root = tmp_path / "runs_api"
+    artifacts = root / "runs" / run_id / "artifacts"
+    parsed = _parsed(ingredients=[
+        {"name": "white liquid", "quantity": 238.0,
+         "unit": "g", "provenance": "seen_video",
+         "basis": "Stable 238 after tare."}])
+    (artifacts / "multimodal_fusion_recipe.json").write_text(
+        json.dumps({
+            "model": "meta-models/muse-spark-open-1026",
+            "provider": "baseten", "prompt_version": "v1.1",
+            "request_id": "chat_fusion", "usage": {},
+            "result": parsed}),
+        encoding="utf-8")
+    (artifacts / "multimodal_merged.json").write_text(
+        json.dumps({"items": [{
+            "source": "segment_006", "kind": "scale_reading",
+            "t": 345.0, "value": 238.0, "unit": "g"}]}),
+        encoding="utf-8")
+    response = client.post(f"/api/recipes/{recipe_id}/build")
+    assert response.status_code == 200
+    assert calls["count"] == 0
+    assert response.json()["recipe"]["ingredients"][0][
+        "quantity"] == 238.0
+
+
+def test_fusion_checks_bundle_falls_back_without_merge(
+        tmp_path: Path):
+    bundle = {"readings": [{"value": 100.0}]}
+    same = app_module._fusion_checks_bundle(  # noqa: SLF001
+        bundle, tmp_path / "runs" / "run_x")
+    assert same["readings"] == [{"value": 100.0}]

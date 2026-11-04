@@ -40,6 +40,9 @@ interface Strings {
   tellAiPlaceholder: string;
   generate: string;
   generating: string;
+  reviseNeedsInput: string;
+  reviseNeedsValues: string;
+  reviseFailed: string;
   allowIngredients: string;
   aiSuggestion: string;
   basedOn: string;
@@ -70,6 +73,14 @@ const STRINGS: Record<string, Strings> = {
       "for my kitchen team. Do not change ingredient quantities.",
     generate: "Generate New Version",
     generating: "Generating…",
+    reviseNeedsInput:
+      "Select at least one improvement with a value, or " +
+      "describe what to improve.",
+    reviseNeedsValues:
+      "Enter a value for each selected improvement, or " +
+      "describe what to improve.",
+    reviseFailed:
+      "Could not generate a new version. Please try again.",
     allowIngredients:
       "Allow AI to change ingredient names and quantities",
     aiSuggestion: "AI suggestion",
@@ -99,6 +110,14 @@ const STRINGS: Record<string, Strings> = {
       "método para mi equipo. No cambies las cantidades.",
     generate: "Generar nueva versión",
     generating: "Generando…",
+    reviseNeedsInput:
+      "Selecciona al menos una mejora con su valor o " +
+      "describe qué quieres mejorar.",
+    reviseNeedsValues:
+      "Escribe el valor de cada mejora seleccionada o " +
+      "describe qué quieres mejorar.",
+    reviseFailed:
+      "No se pudo generar la nueva versión. Inténtalo de nuevo.",
     allowIngredients:
       "Permitir que la IA cambie ingredientes y cantidades",
     aiSuggestion: "Sugerencia de IA",
@@ -395,16 +414,31 @@ export default function RecipeEditor(props: {
       setError("Save your changes before generating a new version.");
       return;
     }
-    if (!instructions.trim()) {
-      setError("Describe what the AI should improve.");
+    const strings = STRINGS[recipe.language === "es" ? "es" : "en"];
+    const choices = recipe.improvement_suggestions ?? [];
+    const hasInstructions = instructions.trim().length > 0;
+    const valued = choices.filter(
+      (item) =>
+        selections[item.id]?.selected &&
+        (selections[item.id]?.value ?? "").trim().length > 0,
+    );
+    const selectedEmpty = choices.filter(
+      (item) =>
+        selections[item.id]?.selected &&
+        (selections[item.id]?.value ?? "").trim().length === 0,
+    );
+    if (!hasInstructions && valued.length === 0) {
+      setError(
+        selectedEmpty.length > 0
+          ? strings.reviseNeedsValues
+          : strings.reviseNeedsInput,
+      );
       return;
     }
     setError(null);
     setNotice(null);
     setRevising(true);
-    const suggestions: RevisionSuggestion[] = (
-      recipe.improvement_suggestions ?? []
-    ).map((item) => ({
+    const suggestions: RevisionSuggestion[] = choices.map((item) => ({
       id: item.id,
       selected: selections[item.id]?.selected ?? false,
       value: selections[item.id]?.value?.trim()
@@ -420,11 +454,10 @@ export default function RecipeEditor(props: {
       });
       props.onNewVersion(result.recipe_id);
     } catch (err: unknown) {
-      setError(
-        err instanceof ApiError
-          ? `Could not generate a new version (${err.message}).`
-          : "Could not generate a new version.",
-      );
+      if (err instanceof ApiError) {
+        console.error("Generate New Version failed:", err.message);
+      }
+      setError(strings.reviseFailed);
     } finally {
       setRevising(false);
     }
@@ -468,7 +501,7 @@ export default function RecipeEditor(props: {
               ` · ${t.basedOn} ${recipe.parent_name}`}
           </p>
           <h2 className="rc-title">
-            {recipe.recipe_name || recipe.title}
+            {recipe.display_name || recipe.recipe_name || recipe.title}
           </h2>
           <p className="muted small">
             {recipe.ingredients.length} {t.ingredients.toLowerCase()} ·{" "}
@@ -561,8 +594,8 @@ export default function RecipeEditor(props: {
               return (
                 <tr key={`ing-${index}`}>
                   <td data-label={t.ingredient}>
-                    <input
-                      type="text"
+                    <textarea
+                      rows={1}
                       aria-label={`${t.ingredient} ${index + 1} name`}
                       value={row.name}
                       maxLength={120}

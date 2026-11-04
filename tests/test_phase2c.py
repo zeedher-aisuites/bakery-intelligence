@@ -46,6 +46,27 @@ def _make_clip(path: Path, seconds: int = 2) -> Path:
     return path
 
 
+def test_split_wav_cuts_absolute_segment(tmp_path: Path):
+    import shutil
+    import wave
+
+    from bakery_intelligence.phase2c.media import split_wav
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is unavailable.")
+    source = tmp_path / "full.wav"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+         "-c:a", "pcm_s16le", str(source)],
+        check=True, timeout=120)
+    segment = split_wav(source, 1.0, 2.0, tmp_path / "seg.wav")
+    with wave.open(str(segment), "rb") as handle:
+        frames = handle.getnframes()
+        rate = handle.getframerate()
+    assert 1.8 < frames / rate < 2.2
+
+
 def test_prompt_versions_pinned_and_validated():
     versions = prompts.prompt_versions()
     assert versions["agent-a-global-culinary-analyst"] == "v1.0"
