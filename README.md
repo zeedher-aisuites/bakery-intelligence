@@ -1,15 +1,32 @@
 # Bakery Intelligence
+**Turning everyday kitchen work into knowledge that lasts.**
 
-Bakery Intelligence turns real bakery preparation videos into
-**evidence-linked, time-indexed recipe drafts**. A chef uploads a
-cooking video, authorizes metered AI analysis, and receives a
-structured draft — ingredients with quantities, ordered preparation
-steps, supporting timestamps, and explicitly unresolved questions —
-ready for human review, correction, approval, and PDF/DOCX export.
+Across professional kitchens, valuable operational knowledge is
+created every day. Recipes are adjusted, techniques are refined,
+and production decisions are made in real time — yet much of
+this knowledge is never formally documented. For small and
+medium-sized food businesses, that gap makes it harder to keep
+processes consistent, train new staff, and preserve expertise
+as teams and practices evolve.
 
-Every claim in a draft carries provenance: what was seen in video,
-what was mentioned in audio, what the model estimated, and what a
-chef confirmed. The system never auto-approves a recipe.
+Bakery Intelligence explores a different approach. Instead of
+requiring chefs and kitchen staff to manually document every
+action, it uses multimodal AI to analyze real production videos
+and reconstruct structured, evidence-backed recipe drafts. By
+combining visual observations, digital scale readings, spoken
+instructions, timestamps, and human review, the system helps
+turn practical kitchen experience into documentation that can
+be inspected, corrected, and reused.
+
+Bakery Intelligence is an evidence-first system for capturing
+culinary operational knowledge. The current MVP focuses on
+bakery production workflows; broader kitchen coverage is a
+future direction, not a completed capability.
+
+Every claim in a draft carries provenance: what was seen in
+video, what was mentioned in audio, what the model estimated,
+and what a chef confirmed. The system never auto-approves a
+recipe.
 
 ## Sample Input Video
 
@@ -27,13 +44,19 @@ inference costs.
 
 ## Problem
 
-Small bakeries hold their production knowledge in video recordings
-and in the heads of experienced staff. Reconstructing a reliable,
-shareable recipe from footage requires watching hours of video,
-transcribing spoken quantities, reading scale displays frame by
-frame, and reconciling contradictions. Bakery Intelligence
-automates the evidence extraction and drafts the recipe, while
-keeping a human in charge of every consequential decision.
+In restaurants, bakeries, and other small food businesses,
+production knowledge lives in recordings and in the memory of
+experienced staff. Recipes evolve, quantities change, and
+techniques improve — often without any written record. When
+that knowledge is not captured, businesses struggle with
+consistency, training, standardization, and continuity.
+
+Reconstructing a reliable recipe from footage means watching
+hours of video, transcribing spoken quantities, reading scale
+displays frame by frame, and reconciling contradictions.
+Bakery Intelligence automates the evidence extraction and
+drafts the recipe, while keeping a human in charge of every
+consequential decision.
 
 ## Core capabilities
 
@@ -55,6 +78,26 @@ keeping a human in charge of every consequential decision.
 - PDF and DOCX export from the saved recipe state.
 - Explicit paid-inference authorization with server-validated
   grants, per-request cost ledger, and strict spending ceilings.
+
+## Why multimodal AI
+
+Transcription alone cannot solve this problem: essential
+information is often visible but never spoken — a scale
+display reading 238, an unlabeled white powder, a tare action.
+Visual analysis alone is equally insufficient: it cannot
+always explain ingredient identity, intent, or preparation
+decisions that the cook states out loud.
+
+Meta Muse Spark provides the visual understanding at the core
+of the MVP: per-frame and batched scale-display observations,
+whole-video culinary context, structured speech claims, and
+evidence consistency checks. Baseten-hosted Muse Spark Open
+contributes segment-level event analysis, recipe fusion, and
+bounded recipe revision; diarized transcription comes from
+Meta's voice model. Deterministic local stages handle merging,
+accounting, validation gates, and exports. The design goal is
+reconstruction from observable evidence — never plausible
+invention.
 
 ## Architecture overview
 
@@ -310,6 +353,18 @@ Pydantic-to-JSON-Schema exports.
   spending ceiling; usage is recorded with explicit unknown-cost
   labeling. The USD 20 ceiling must not be read as a total
   multi-provider cap.
+
+## Future direction
+
+The MVP establishes bakery production as the first domain for
+evidence-backed culinary knowledge capture. Natural next steps
+include additional food-production environments, richer
+ingredient identification from packaging and labels, tighter
+audio-visual timestamp alignment, and longitudinal tracking of
+how recipes evolve across batches. Each extension must meet
+the same bar as the MVP: observable evidence, explicit
+uncertainty, and human approval before anything is treated as
+confirmed.
 
 ## Known limitations
 
