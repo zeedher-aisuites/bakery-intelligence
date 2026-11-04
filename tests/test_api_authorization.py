@@ -437,10 +437,14 @@ def test_meta_request_cap_halts_before_dispatch(
     _patch_builder(monkeypatch, sdk)
     _set_key(monkeypatch)
     assert run_once(store, storage, "worker-1") == record.run_id
-    assert service.get(record.run_id).status == STATUS_COMPLETED
+    final = service.get(record.run_id)
+    assert final.status == STATUS_FAILED
+    assert "terminated" in (final.error or "")
     assert len(sdk.calls) == 2
-    report = json.loads(storage.read_artifact(
-        record.run_id, "firstpass_report.json"))
+    report = json.loads((
+        storage.run_work_dir(record.run_id) / "firstpass"
+        / "reports" / "run_report.json").read_text(
+            encoding="utf-8"))
     assert report["budget"]["stopped_reason"] == STOP_REQUEST_LIMIT
     assert report["budget"]["remaining_frame_indices"] == [20]
 

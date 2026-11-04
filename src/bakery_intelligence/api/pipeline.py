@@ -135,6 +135,158 @@ STAGE_EXTRACTED = "extracted"
 STAGE_FIRSTPASS_RUNNING = "firstpass_running"
 STAGE_FIRSTPASS_DONE = "firstpass_done"
 
+# FirstPass engine selection (experiment branch only).
+# "single_frame" is the stable V1 default; "contextual_batch"
+# runs the vendored V2 grouped runner. Selection is a
+# developer-only pipeline parameter (or FIRSTPASS_ENGINE for
+# worker entries); there is no UI control and no workflow
+# registry change. The engine is fingerprinted into durable
+# state so cross-engine resume refuses with a diff.
+FIRSTPASS_ENGINE_SINGLE = "single_frame"
+FIRSTPASS_ENGINE_BATCH = "contextual_batch"
+FIRSTPASS_ENGINES = (
+    FIRSTPASS_ENGINE_SINGLE, FIRSTPASS_ENGINE_BATCH)
+FIRSTPASS_ENGINE_ENV_VAR = "FIRSTPASS_ENGINE"
+FIRSTPASS_BATCH_GROUP_SIZE = 10
+# Maximum per-group output budget for contextual batches. The
+# value sits below every reported muse-spark-1.3 output maximum
+# (65,536-131,072 across third-party catalogs; 16,384 proven
+# in-repo on this endpoint). The effective per-group budget is
+# grant-derived (per-frame allowance times group size) and
+# capped here, never raised silently.
+FIRSTPASS_BATCH_MAX_OUTPUT_TOKENS = 32768
+# Validation replays per group (received-but-unusable
+# responses only; ambiguous transport is never replayed) and
+# the consecutive-exhaustion early stop. Transport attempts
+# stay single-submit.
+FIRSTPASS_BATCH_MAX_VALIDATION_ATTEMPTS = 3
+FIRSTPASS_BATCH_MAX_CONSECUTIVE_EXHAUSTED = 2
+
+
+def firstpass_engine_from_env() -> str:
+    """Read the developer-only engine selector.
+
+    Returns "single_frame" unless FIRSTPASS_ENGINE names a
+    supported engine. Unknown values fail fast instead of
+    silently running the wrong engine on billable work.
+    """
+    import os
+
+    value = os.environ.get(
+        FIRSTPASS_ENGINE_ENV_VAR, "").strip()
+    if not value:
+        return FIRSTPASS_ENGINE_SINGLE
+    if value not in FIRSTPASS_ENGINES:
+        raise ValueError(
+            f"{FIRSTPASS_ENGINE_ENV_VAR} must be one of "
+            f"{list(FIRSTPASS_ENGINES)}, got {value!r}.")
+    return value
+
+
+def _validate_firstpass_engine(engine: str) -> str:
+    """Accept only supported engine ids (fail fast)."""
+    if engine not in FIRSTPASS_ENGINES:
+        raise ValueError(
+            "firstpass_engine must be one of "
+            f"{list(FIRSTPASS_ENGINES)}, got {engine!r}.")
+    return engine
+
+
+def _batch_token_budget(grant_budget: int) -> int:
+    """Derive the per-group output budget from the grant.
+
+    The grant authorizes a per-frame output allowance for
+    single-frame requests; one batch request covers a full
+    group, so the allowance scales by group size and is
+    capped at the verified batch maximum. The binding spend
+    and request guards (cost ceiling, max requests) are
+    unchanged: total theoretical output volume stays below
+    the single-frame equivalent (65 x 32768 < 645 x 4096).
+    """
+    if (isinstance(grant_budget, bool)
+            or not isinstance(grant_budget, int)
+            or grant_budget <= 0):
+        raise ValueError(
+            "grant token budget must be a positive int, "
+            f"got {grant_budget!r}.")
+    return min(grant_budget * FIRSTPASS_BATCH_GROUP_SIZE,
+               FIRSTPASS_BATCH_MAX_OUTPUT_TOKENS)
+
+
+def _contextual_firstpass_runner(
+        *, frame_refs: list,
+        source,
+        firstpass_dir: Path,
+        model: str,
+        meta_backed: bool,
+        client,
+        billable_token_budget: int,
+        billable_max_requests,
+        billable_cost_ceiling_usd,
+        billable_rates_usd_per_m,
+        billable_strict_cost: bool,
+        billable_api_key: str,
+        global_context):
+    """Build the V2 grouped runner with pipeline bounds.
+
+    Billable posture mirrors the V1 seam: caller client,
+    effective per-group token budget (already grant-derived
+    and capped by the caller), request cap as the group
+    cap, cost guards, single-submit transport. Validation
+    retries and the consecutive-exhaustion early stop are
+    enabled; ambiguous transport is never replayed. Fake
+    mode uses the deterministic grouped fake; a
+    single-frame fake override is refused by the caller.
+    """
+    from bakery_intelligence.inference.firstpass_v2 import (
+        DeterministicGroupFakeClient,
+        FirstPassV2Config,
+        FirstPassV2Runner,
+    )
+
+    rates = (tuple(billable_rates_usd_per_m)
+             if meta_backed
+             and billable_rates_usd_per_m is not None
+             else None)
+    if meta_backed:
+        config = FirstPassV2Config(
+            frames=list(frame_refs), source=source,
+            out_dir=firstpass_dir, model=model,
+            group_size=FIRSTPASS_BATCH_GROUP_SIZE,
+            token_budget=billable_token_budget,
+            global_context=global_context,
+            max_groups=billable_max_requests,
+            rates_usd_per_m=rates,
+            cost_ceiling_usd=billable_cost_ceiling_usd,
+            strict_cost=billable_strict_cost,
+            billable=True,
+            uncertain_policy=UNCERTAIN_REFUSE,
+            max_attempts=1,
+            max_validation_attempts=(
+                FIRSTPASS_BATCH_MAX_VALIDATION_ATTEMPTS),
+            max_consecutive_exhausted=(
+                FIRSTPASS_BATCH_MAX_CONSECUTIVE_EXHAUSTED),
+            api_key=billable_api_key,
+            client_factory=lambda: client,
+        )
+    else:
+        config = FirstPassV2Config(
+            frames=list(frame_refs), source=source,
+            out_dir=firstpass_dir, model=model,
+            group_size=FIRSTPASS_BATCH_GROUP_SIZE,
+            token_budget=billable_token_budget,
+            global_context=global_context,
+            billable=False,
+            uncertain_policy=UNCERTAIN_RERUN,
+            max_attempts=DEFAULT_MAX_ATTEMPTS,
+            max_validation_attempts=(
+                FIRSTPASS_BATCH_MAX_VALIDATION_ATTEMPTS),
+            max_consecutive_exhausted=(
+                FIRSTPASS_BATCH_MAX_CONSECUTIVE_EXHAUSTED),
+            client_factory=DeterministicGroupFakeClient,
+        )
+    return FirstPassV2Runner(config)
+
 # Stage directories wiped for a clean start when no durable
 # state exists. The firstpass directory is never wiped: billed
 # inference progress without a state file fails closed instead
@@ -549,7 +701,7 @@ def _hash_firstpass_files(firstpass_dir: Path
     """
     hashed: dict[str, str] = {}
     for sub in ("raw_responses", "observations", "checkpoints",
-                "reports"):
+                "reports", "contexts"):
         subdir = firstpass_dir / sub
         if not subdir.is_dir():
             continue
@@ -622,9 +774,65 @@ def _verify_firstpass_outputs(
     return report
 
 
-def _lifetime_firstpass_stats(firstpass_dir: Path,
-                              total_frames: int
-                              ) -> dict[str, Any]:
+def _reject_terminated_firstpass(
+        run_id: str, report: dict[str, Any]) -> None:
+    """Fail a run whose first pass terminated instead of
+    completing.
+
+    A stopped first pass (consecutive-group exhaustion,
+    budget halt, request cap) leaves explicitly unobserved
+    footage: continuing to recipe generation would present
+    partial coverage as a complete analysis. Completed
+    observations stay on disk with their raw responses,
+    checkpoints, and report; only the transition to
+    reconstruction is refused, so the job fails visibly
+    instead of succeeding doubtfully. Valid model
+    abstentions are unaffected: abstention is a property of
+    observation content, while this gate reads execution
+    termination only.
+    """
+    reason = report.get("stopped_reason")
+    if reason is None:
+        return
+    total = report.get("frames_total")
+    observed = report.get("frames_observed")
+    failed = report.get("frames_failed")
+    raise ValueError(
+        f"Run {run_id}: first-pass terminated "
+        f"({reason}); refusing to reconstruct from "
+        f"partial coverage ({observed} of {total} frames "
+        f"observed, {failed} with no observation). "
+        f"Inspect firstpass/reports/run_report.json and the "
+        f"checkpoints; abstentions inside observed frames "
+        f"are counted separately from unobserved footage.")
+
+
+def _raw_record_terminal(
+        record: Any, name: str) -> tuple[list[int], str]:
+    """Extract covered frames and terminal from a raw record.
+
+    V1 records carry one frame index; contextual group
+    records carry several. Every covered frame takes the
+    group terminal unless a persisted observation overrides
+    it during verification.
+    """
+    frames = record.get("frame_indices") if isinstance(
+        record, dict) else None
+    terminal = record.get("terminal_state") if isinstance(
+        record, dict) else None
+    valid_frames = (
+        isinstance(frames, list) and len(frames) >= 1
+        and all(isinstance(i, int)
+                and not isinstance(i, bool)
+                for i in frames))
+    if not valid_frames or not isinstance(terminal, str):
+        raise PipelineResumeError(
+            f"Raw response file is malformed: {name}.")
+    return frames, terminal
+
+
+def _lifetime_firstpass_stats(
+        firstpass_dir: Path, total_frames: int) -> dict[str, Any]:
     """Derive lifetime observation stats from durable files.
 
     Each frame takes its observation terminal when observed,
@@ -644,24 +852,18 @@ def _lifetime_firstpass_stats(firstpass_dir: Path,
             raise PipelineResumeError(
                 f"Raw response file is unreadable: "
                 f"{raw_path.name}.") from exc
+        if isinstance(records, dict):
+            # Contextual group files persist one dict.
+            records = [records]
         if not isinstance(records, list):
             raise PipelineResumeError(
                 f"Raw response file is malformed: "
                 f"{raw_path.name}.")
         for record in records:
-            frames = record.get("frame_indices") if isinstance(
-                record, dict) else None
-            terminal = record.get("terminal_state") if (
-                isinstance(record, dict)) else None
-            if (not isinstance(frames, list)
-                    or len(frames) != 1
-                    or not isinstance(frames[0], int)
-                    or isinstance(frames[0], bool)
-                    or not isinstance(terminal, str)):
-                raise PipelineResumeError(
-                    f"Raw response file is malformed: "
-                    f"{raw_path.name}.")
-            terminals[frames[0]] = terminal
+            indices, terminal = _raw_record_terminal(
+                record, raw_path.name)
+            for frame_index in indices:
+                terminals[frame_index] = terminal
     observations = _collect_observations(firstpass_dir)
     for item in observations:
         terminal = item.get("terminal_state")
@@ -701,6 +903,8 @@ def run_pipeline_offline(
     billable_api_key: str = "",
     billable_live: bool = False,
     max_video_bytes: int = PIPELINE_MAX_VIDEO_BYTES,
+    firstpass_engine: str = FIRSTPASS_ENGINE_SINGLE,
+    firstpass_global_context: str | None = None,
 ) -> dict[str, bytes]:
     """Run all pipeline stages; return id -> bytes artifacts.
 
@@ -764,7 +968,10 @@ def run_pipeline_offline(
             billable_rates_usd_per_m=billable_rates_usd_per_m,
             billable_strict_cost=billable_strict_cost,
             billable_api_key=billable_api_key,
-            billable_live=billable_live)
+            billable_live=billable_live,
+            firstpass_engine=firstpass_engine,
+            firstpass_global_context=(
+                firstpass_global_context))
     finally:
         Path(handle.name).unlink(missing_ok=True)
 
@@ -788,6 +995,8 @@ def _run_pipeline_core(
     billable_strict_cost: bool = False,
     billable_api_key: str = "",
     billable_live: bool = False,
+    firstpass_engine: str = FIRSTPASS_ENGINE_SINGLE,
+    firstpass_global_context: str | None = None,
 ) -> dict[str, bytes]:
     """Pipeline stages over a staged input file on disk.
 
@@ -818,6 +1027,17 @@ def _run_pipeline_core(
             billable_token_budget, billable_max_requests,
             billable_cost_ceiling_usd, billable_rates_usd_per_m,
             billable_strict_cost, billable_api_key)
+    _validate_firstpass_engine(firstpass_engine)
+    batch_engine = (
+        firstpass_engine == FIRSTPASS_ENGINE_BATCH)
+    batch_token_budget = (
+        _batch_token_budget(billable_token_budget)
+        if batch_engine else billable_token_budget)
+    if batch_engine and fake is not None:
+        raise ValueError(
+            "The contextual engine uses the grouped fake "
+            "client; a single-frame fake override is "
+            "incompatible.")
     client: InferenceClient = (
         billable_client if meta_backed
         else fake or DeterministicFakeClient())
@@ -835,8 +1055,17 @@ def _run_pipeline_core(
         "provider": provider_id,
         "pass_id": PIPELINE_PASS_ID,
         "batch_size": PIPELINE_BATCH_SIZE,
+        "engine": firstpass_engine,
+        "group_size": (FIRSTPASS_BATCH_GROUP_SIZE
+                       if batch_engine else None),
+        "max_validation_attempts": (
+            FIRSTPASS_BATCH_MAX_VALIDATION_ATTEMPTS
+            if batch_engine else None),
+        "max_consecutive_exhausted": (
+            FIRSTPASS_BATCH_MAX_CONSECUTIVE_EXHAUSTED
+            if batch_engine else None),
         "token_budgets": (
-            [billable_token_budget] if meta_backed
+            [batch_token_budget] if (meta_backed or batch_engine)
             else list(DEFAULT_BUDGETS)),
         "prompt_sha256": prompt_hash(PIPELINE_PROMPT),
         "max_requests": (
@@ -946,6 +1175,24 @@ def _run_pipeline_core(
                         "sidecar_name")
         }
         actual["firstpass"] = state.get("firstpass")
+        prior_firstpass = actual["firstpass"]
+        if isinstance(prior_firstpass, dict) and (
+                "engine" not in prior_firstpass
+                or "group_size" not in prior_firstpass
+                or "max_validation_attempts" not in prior_firstpass
+                or "max_consecutive_exhausted"
+                not in prior_firstpass):
+            # Pre-experiment states predate the engine
+            # fingerprint; they are single-frame runs.
+            backfilled = dict(prior_firstpass)
+            backfilled.setdefault(
+                "engine", FIRSTPASS_ENGINE_SINGLE)
+            backfilled.setdefault("group_size", None)
+            backfilled.setdefault(
+                "max_validation_attempts", None)
+            backfilled.setdefault(
+                "max_consecutive_exhausted", None)
+            actual["firstpass"] = backfilled
         diffs = _diff_json(expected, actual, "state")
         if diffs:
             raise PipelineResumeError(
@@ -972,10 +1219,26 @@ def _run_pipeline_core(
         firstpass_report = _verify_firstpass_outputs(
             firstpass_dir, state,
             [frame.frame_index for frame in frame_refs])
+        _reject_terminated_firstpass(run_id, firstpass_report)
     else:
         state["stage"] = STAGE_FIRSTPASS_RUNNING
         _write_state_atomic(work_dir, state)
-        if meta_backed:
+        if batch_engine:
+            runner = _contextual_firstpass_runner(
+                frame_refs=frame_refs, source=source_ref,
+                firstpass_dir=firstpass_dir,
+                model=firstpass_config["model"],
+                meta_backed=meta_backed, client=client,
+                billable_token_budget=batch_token_budget,
+                billable_max_requests=billable_max_requests,
+                billable_cost_ceiling_usd=(
+                    billable_cost_ceiling_usd),
+                billable_rates_usd_per_m=(
+                    billable_rates_usd_per_m),
+                billable_strict_cost=billable_strict_cost,
+                billable_api_key=billable_api_key,
+                global_context=firstpass_global_context)
+        elif meta_backed:
             runner_config = billable_runner_config(
                 frames=frame_refs, source=source_ref,
                 out_dir=firstpass_dir,
@@ -1007,7 +1270,12 @@ def _run_pipeline_core(
                 billable=False,
                 uncertain_policy=UNCERTAIN_RERUN,
             )
-        firstpass_report = FirstPassRunner(runner_config).run()
+        if batch_engine:
+            firstpass_report = runner.run()
+        else:
+            firstpass_report = FirstPassRunner(
+                runner_config).run()
+        _reject_terminated_firstpass(run_id, firstpass_report)
         report_path = (firstpass_dir / "reports"
                        / "run_report.json")
         try:
@@ -1148,6 +1416,8 @@ def run_pipeline_from_path(
     billable_api_key: str = "",
     billable_live: bool = False,
     max_video_bytes: int = PIPELINE_MAX_VIDEO_BYTES,
+    firstpass_engine: str = FIRSTPASS_ENGINE_SINGLE,
+    firstpass_global_context: str | None = None,
 ) -> dict[str, bytes]:
     """Run the pipeline over a video file already on disk.
 
@@ -1183,7 +1453,9 @@ def run_pipeline_from_path(
         billable_rates_usd_per_m=billable_rates_usd_per_m,
         billable_strict_cost=billable_strict_cost,
         billable_api_key=billable_api_key,
-        billable_live=billable_live)
+        billable_live=billable_live,
+        firstpass_engine=firstpass_engine,
+        firstpass_global_context=firstpass_global_context)
 
 
 def _run_source_pipeline(storage: StorageBackend,
@@ -1306,6 +1578,7 @@ def execute_video_pipeline_meta(
             billable_api_key=api_key,
             billable_live=True,
             max_frames=grant.max_frames,
+            firstpass_engine=firstpass_engine_from_env(),
         )
     except Exception as exc:
         message = str(exc)
