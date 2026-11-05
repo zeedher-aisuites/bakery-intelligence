@@ -28,6 +28,13 @@ video, what was mentioned in audio, what the model estimated,
 and what a chef confirmed. The system never auto-approves a
 recipe.
 
+## Demo Video
+
+Watch the 3-minute product demonstration: problem,
+multimodal workflow, generated recipe, and vision.
+
+[docs/demo/bakery-intelligence-demo.mp4](docs/demo/bakery-intelligence-demo.mp4)
+
 ## Sample Input Video
 
 The original bakery production video used for real-world

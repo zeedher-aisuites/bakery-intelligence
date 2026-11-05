@@ -239,6 +239,9 @@ runs_api/
 *.avi
 *.mkv
 
+# Exception: the published 3-minute product demonstration.
+!docs/demo/bakery-intelligence-demo.mp4
+
 # Billable authorization grants and session working notes.
 docs/m206/smoke-grant-*.json
 docs/m206/session-handoff-*.md
