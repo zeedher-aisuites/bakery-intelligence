@@ -161,9 +161,9 @@ test("related versions group into one family card", async () => {
       container, "2 versions").textContent;
     assert.ok(first.includes("2 versions"),
       "family version count is missing");
-    assert.ok(first.includes("Latest: Version 2"),
+    assert.ok(first.includes("v2 · Latest"),
       "latest version is not prominent");
-    assert.ok(first.includes("Version 2 · Chef Revision"),
+    assert.ok(first.includes("Chef Revision"),
       "revision designation is missing");
   } finally {
     cleanup();
@@ -175,7 +175,7 @@ test("identical titles stay in separate families", async () => {
   try {
     const cards = families(container);
     assert.equal(cards.length, 2);
-    assert.ok(cards[1].textContent.includes("Version 1"),
+    assert.ok(cards[0].textContent.includes("v1 · Latest"),
       "unrelated singleton family is missing");
   } finally {
     cleanup();

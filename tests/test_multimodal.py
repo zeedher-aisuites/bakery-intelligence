@@ -727,7 +727,7 @@ def test_fusion_stage_validates_proposal_schema(
         "Roles XL", "es", tmp_path)
     assert record["provider"] == "baseten"
     assert record["model"] == mm.BASETEN_MODEL
-    assert record["prompt_version"] == "v1.1"
+    assert record["prompt_version"] == "v1.2"
     assert record["request_id"] == "chat_fake1"
     assert record["result"]["title"] == "Cinnamon Rolls"
     assert call.stage == "fusion"
@@ -1834,3 +1834,79 @@ def test_merged_legacy_bundle_without_accounting() -> None:
     assert merged["readings_total"] == 1
     assert merged["readings_usable_total"] == 1
     assert merged["readings_truncated"] is False
+
+
+def test_fusion_stage_normalizes_long_names(
+        tmp_path: Path) -> None:
+    """Over-long names are repaired, not fatal."""
+    long_name = ("Opaque white liquid in a large steel bowl "
+                 "on the bench (audio identifies as milk, "
+                 "no carton visible - identity unconfirmed)")
+    assert len(long_name) > 120
+    proposal = _proposal(ingredients=[
+        {"name": long_name, "quantity": 700.0, "unit": "g",
+         "provenance": "seen_video",
+         "basis": "Scale display 700 at t=10s."}])
+    fake = FakeBaseten([json.dumps(proposal)])
+    record, call = mm.run_fusion_stage(
+        fake, _merged(), {"result": {}}, "Test", "en",
+        tmp_path)
+    assert call.status == "ok"
+    assert record["result"]["ingredients"][0][
+        "name"] == ("Opaque white liquid in a large steel "
+                    "bowl on the bench")
+    assert long_name in record["result"][
+        "ingredients"][0]["basis"]
+    assert record["normalizations"][0]["kind"] == (
+        "name_split")
+
+
+def test_fusion_stage_reuses_valid_record(
+        tmp_path: Path) -> None:
+    """A repaired record is reused without a new call."""
+    stored = {
+        "model": mm.BASETEN_MODEL, "provider": "baseten",
+        "prompt_version": "v1.2",
+        "request_id": "chatcmpl_old",
+        "finish_reason": "stop",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+        "result": _proposal(),
+    }
+    (tmp_path / "fusion_recipe.json").write_text(
+        json.dumps(stored), encoding="utf-8")
+
+    class ExplodingBaseten:
+        def chat(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("Baseten must not be called")
+
+    record, call = mm.run_fusion_stage(
+        ExplodingBaseten(), _merged(), {"result": {}},
+        "Test", "en", tmp_path)
+    assert call.status == "reused"
+    assert call.estimate_usd == 0.0
+    assert record["request_id"] == "chatcmpl_old"
+
+
+def test_fusion_stage_ignores_invalid_record(
+        tmp_path: Path) -> None:
+    """An invalid stored record falls through to Baseten."""
+    stored = {
+        "model": mm.BASETEN_MODEL, "provider": "baseten",
+        "prompt_version": "v1.2",
+        "request_id": "chatcmpl_bad",
+        "finish_reason": "stop",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+        "result": _proposal(ingredients=[
+            {"name": "", "quantity": None, "unit": None,
+             "provenance": "ai_estimated",
+             "basis": "Estimate."}]),
+    }
+    (tmp_path / "fusion_recipe.json").write_text(
+        json.dumps(stored), encoding="utf-8")
+    fake = FakeBaseten([json.dumps(_proposal())])
+    record, call = mm.run_fusion_stage(
+        fake, _merged(), {"result": {}}, "Test", "en",
+        tmp_path)
+    assert call.status == "ok"
+    assert len(fake.calls) == 1
+    assert record["request_id"] != "chatcmpl_bad"

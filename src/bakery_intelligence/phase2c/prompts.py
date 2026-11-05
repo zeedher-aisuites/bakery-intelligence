@@ -245,7 +245,7 @@ RECIPE_REVISION = RolePrompt(
 
 RECIPE_PROPOSAL = RolePrompt(
     role_id="recipe-proposal-specialist",
-    version="v1.1",
+    version="v1.2",
     model="muse-spark-1.3",
     responsibility=(
         "Draft a first chef-readable recipe directly from a "
@@ -254,11 +254,13 @@ RECIPE_PROPOSAL = RolePrompt(
         "Draft a first recipe ONLY from the analysis bundle "
         "below. Return structured JSON only, with keys: "
         "meaningful boolean, reason string, title string, "
-        "ingredients (name, quantity number or null, unit "
-        "string or null, provenance one of seen_video or "
-        "ai_estimated, basis string), method (number from 1, "
+        "ingredients (name at most 120 characters, quantity "
+        "number or null, unit string or null, provenance one "
+        "of seen_video or ai_estimated, basis string), method "
+        "(number from 1, "
         "instruction), notes (production notes), suggestions "
-        "(id slug, label, hint, placeholder for missing info), "
+        "(at most 8 items with id slug, label, hint, "
+        "placeholder for missing info), "
         "open_questions. Rules: the recipe name is context, "
         "never evidence; a seen_video quantity MUST equal a "
         "bundle reading within 1 g, anything else is "
@@ -266,7 +268,8 @@ RECIPE_PROPOSAL = RolePrompt(
         "packaging-visible names are allowed as ai_estimated "
         "with an unconfirmed basis, never seen_video; observed "
         "actions (tare, pour, place) support method steps even "
-        "when quantities stay null; never invent readings, "
+        "when quantities stay null; keep names short and move "
+        "detail into basis; never invent readings, "
         "timestamps, labels, or audio quotes; write ALL prose "
         "in the requested language; return meaningful false "
         "ONLY when the bundle has no usable readings, objects, "

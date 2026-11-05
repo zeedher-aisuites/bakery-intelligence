@@ -404,7 +404,7 @@ def test_assemble_snapshot_provenance_overrides(
             "builder": "multimodal-fusion/1",
             "provider": "baseten",
             "model": "meta-models/muse-spark-open-1026",
-            "prompt_version": "v1.1",
+            "prompt_version": "v1.2",
         })
     provenance = snapshot["provenance"]
     assert provenance["builder"] == "multimodal-fusion/1"
@@ -423,7 +423,7 @@ def test_build_endpoint_reuses_fusion_without_call(
      / "multimodal_fusion_recipe.json").write_text(
         json.dumps({
             "model": "meta-models/muse-spark-open-1026",
-            "provider": "baseten", "prompt_version": "v1.1",
+            "provider": "baseten", "prompt_version": "v1.2",
             "request_id": "chat_fusion", "usage": {},
             "result": _parsed()}),
         encoding="utf-8")
@@ -456,7 +456,7 @@ def test_build_endpoint_rejects_invalid_fusion(
      / "multimodal_fusion_recipe.json").write_text(
         json.dumps({
             "model": "meta-models/muse-spark-open-1026",
-            "provider": "baseten", "prompt_version": "v1.1",
+            "provider": "baseten", "prompt_version": "v1.2",
             "request_id": "chat_bad", "usage": {},
             "result": {"meaningful": True}}),
         encoding="utf-8")
@@ -486,7 +486,7 @@ def test_build_endpoint_grounds_fusion_in_merged_readings(
     (artifacts / "multimodal_fusion_recipe.json").write_text(
         json.dumps({
             "model": "meta-models/muse-spark-open-1026",
-            "provider": "baseten", "prompt_version": "v1.1",
+            "provider": "baseten", "prompt_version": "v1.2",
             "request_id": "chat_fusion", "usage": {},
             "result": parsed}),
         encoding="utf-8")
@@ -601,3 +601,104 @@ def test_row_source_distinguishes_audio_estimates():
     assert ingredient_role(
         {"name": "flour", "quantity_basis": "display 700"}
     ) == "raw"
+
+
+def _long_name_draft() -> dict[str, Any]:
+    parsed = _parsed()
+    parsed["ingredients"] = [
+        {"name": "Opaque white liquid in a large steel bowl "
+                 "on the bench (audio identifies as milk, "
+                 "no carton or label visible - identity "
+                 "unconfirmed)",
+         "quantity": 238, "unit": "g",
+         "provenance": "seen_video",
+         "basis": "Scale display 238."},
+        {"name": "flour", "quantity": 40, "unit": "g",
+         "provenance": "seen_video",
+         "basis": "Scale display 40."},
+    ]
+    return parsed
+
+
+def test_normalize_splits_long_name_losslessly():
+    parsed = _long_name_draft()
+    original = parsed["ingredients"][0]["name"]
+    assert len(original) > 120
+    adjusted = proposal_mod.normalize_proposal_draft(parsed)
+    assert len(adjusted) == 1
+    assert adjusted[0]["kind"] == "name_split"
+    assert adjusted[0]["row"] == 0
+    row = parsed["ingredients"][0]
+    assert row["name"] == "Opaque white liquid in a large steel bowl on the bench"
+    assert len(row["name"]) <= 120
+    assert original in row["basis"]
+    assert len(row["basis"]) <= 500
+
+
+def test_normalize_noop_when_names_fit():
+    parsed = _parsed()
+    assert proposal_mod.normalize_proposal_draft(
+        parsed) == []
+
+
+def test_normalize_rejects_unsplittable_name():
+    parsed = _parsed()
+    parsed["ingredients"] = [{
+        "name": "x" * 121, "quantity": None, "unit": None,
+        "provenance": "ai_estimated", "basis": "Estimate."}]
+    with pytest.raises(proposal_mod.ProposalError,
+                       match="no splittable qualifier"):
+        proposal_mod.normalize_proposal_draft(parsed)
+
+
+def test_normalize_rejects_exhausted_basis():
+    parsed = _long_name_draft()
+    parsed["ingredients"][0]["basis"] = "y" * 490
+    with pytest.raises(proposal_mod.ProposalError,
+                       match="basis budget"):
+        proposal_mod.normalize_proposal_draft(parsed)
+
+
+def test_normalize_moves_suggestion_overflow_to_notes():
+    parsed = _parsed()
+    parsed["suggestions"] = [
+        {"id": f"s{i:02d}", "label": f"Label {i}",
+         "hint": f"Hint {i}", "placeholder": f"Fill {i}"}
+        for i in range(10)
+    ]
+    notes_before = len(parsed["notes"])
+    adjusted = proposal_mod.normalize_proposal_draft(parsed)
+    assert len(parsed["suggestions"]) == 8
+    assert len(parsed["notes"]) == notes_before + 2
+    assert [a["kind"] for a in adjusted] == [
+        "suggestion_overflow"] * 2
+    assert "'s08'" in parsed["notes"][-2]
+    assert "'s09'" in parsed["notes"][-1]
+
+
+def test_normalize_rejects_notes_budget_exhaustion():
+    parsed = _parsed()
+    parsed["suggestions"] = [
+        {"id": f"s{i:02d}", "label": f"Label {i}",
+         "hint": f"Hint {i}", "placeholder": f"Fill {i}"}
+        for i in range(10)
+    ]
+    parsed["notes"] = [f"note {i}" for i in range(15)]
+    with pytest.raises(proposal_mod.ProposalError,
+                       match="notes budget"):
+        proposal_mod.normalize_proposal_draft(parsed)
+
+
+def test_validator_distinguishes_empty_and_long_names():
+    bundle = {"readings": [{"value": 40.0}]}
+    empty = _parsed()
+    empty["ingredients"] = [{
+        "name": "  ", "quantity": None, "unit": None,
+        "provenance": "ai_estimated", "basis": "Estimate."}]
+    with pytest.raises(proposal_mod.ProposalError,
+                       match="needs a name"):
+        proposal_mod.validate_proposal(bundle, empty)
+    long = _long_name_draft()
+    with pytest.raises(proposal_mod.ProposalError,
+                       match="exceeds 120 characters"):
+        proposal_mod.validate_proposal(bundle, long)

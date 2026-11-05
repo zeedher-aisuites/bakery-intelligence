@@ -1395,6 +1395,40 @@ def run_fusion_stage(baseten: BasetenClient,
         },
     }
     write_json(work_dir / "fusion_input.json", fusion_input)
+    reuse_path = work_dir / "fusion_recipe.json"
+    if reuse_path.is_file():
+        try:
+            stored = json.loads(reuse_path.read_text(
+                encoding="utf-8"))
+        except (OSError, ValueError):
+            stored = None
+        if isinstance(stored, dict) and isinstance(
+                stored.get("result"), dict):
+            reuse_checks = {
+                "readings": [{
+                    "value": item.get("value")}
+                    for item in merged.get("items") or []
+                    if item.get("kind") == "scale_reading"
+                    and isinstance(item.get("value"),
+                                   (int, float))],
+                "language": language,
+                "recipe_name": recipe_name,
+            }
+            try:
+                proposal_mod.validate_proposal(
+                    reuse_checks, stored["result"])
+            except proposal_mod.ProposalError:
+                stored = None
+            else:
+                call = StageCall(
+                    stage="fusion", provider="baseten",
+                    model=stored.get("model", ""),
+                    request_id=stored.get("request_id", ""),
+                    status="reused", elapsed_seconds=0.0,
+                    usage=stored.get("usage") or {},
+                    estimate_usd=0.0,
+                    error=BASEN_COST_UNKNOWN)
+                return stored, call
     instruction = (
         prompt.instruction
         + "\n\nEVIDENCE (JSON, capped):\n"
@@ -1441,6 +1475,8 @@ def run_fusion_stage(baseten: BasetenClient,
         "recipe_name": recipe_name,
     }
     try:
+        normalizations = (
+            proposal_mod.normalize_proposal_draft(parsed))
         validated = proposal_mod.validate_proposal(
             checks_bundle, parsed)
     except proposal_mod.ProposalError as exc:
@@ -1462,6 +1498,7 @@ def run_fusion_stage(baseten: BasetenClient,
         "request_id": result["id"],
         "finish_reason": result.get("finish_reason"),
         "usage": result["usage"],
+        "normalizations": normalizations,
         "result": validated,
     }
     write_json(work_dir / "fusion_recipe.json", record)

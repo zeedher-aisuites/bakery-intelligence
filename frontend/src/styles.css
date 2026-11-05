@@ -919,11 +919,32 @@ button.btn-primary:disabled,
   gap: 1rem;
 }
 
-.family-head .btn-ghost {
-  flex-shrink: 0;
+.family-head strong {
+  overflow-wrap: anywhere;
+}
+
+.version-badge {
+  display: inline-flex;
+  align-items: center;
   align-self: flex-start;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--muted);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
   white-space: nowrap;
-  padding: 0.45rem 0.9rem;
+}
+
+.family-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.family-foot .btn-ghost {
+  white-space: nowrap;
 }
 
 .family-head > div {

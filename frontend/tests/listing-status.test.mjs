@@ -131,6 +131,29 @@ test("listing shows truthful processing states", async () => {
   }
 });
 
+test("view action sits in a footer below the title", async () => {
+  const { container, cleanup } = await renderApp();
+  try {
+    const card = Array.from(
+      container.querySelectorAll("li.family-card"))
+      .find((el) => el.textContent.includes("Stale Dish"));
+    const head = card.querySelector(".family-head");
+    assert.ok(
+      !head.querySelector("button"),
+      "family head must not contain the action button");
+    const foot = card.querySelector(".family-foot");
+    assert.ok(foot, "family footer is missing");
+    const action = foot.querySelector("button");
+    assert.ok(action, "footer action is missing");
+    assert.equal(action.textContent.trim(), "View Recipe");
+    const badge = head.querySelector(".version-badge");
+    assert.ok(badge, "version badge is missing");
+    assert.equal(badge.textContent.trim(), "v1 \u00b7 Latest");
+  } finally {
+    cleanup();
+  }
+});
+
 test("latest row does not repeat the family name", async () => {
   const { container, cleanup } = await renderApp();
   try {
@@ -144,7 +167,7 @@ test("latest row does not repeat the family name", async () => {
     assert.ok(
       !row.textContent.includes("Stale Dish"),
       "latest row repeats the family head name");
-    assert.ok(row.textContent.includes("Version 1"));
+    assert.ok(row.textContent.includes("v1 · Latest"));
   } finally {
     cleanup();
   }

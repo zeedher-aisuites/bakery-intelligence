@@ -24,6 +24,8 @@ PROPOSAL_SCHEMA = "recipe-proposal/1"
 SNAPSHOT_VERSION = "recipe-snapshot/4"
 
 MAX_READINGS = 40
+MAX_NAME_CHARS = 120
+MAX_BASIS_CHARS = 500
 MAX_OBJECTS = 40
 MAX_CONTAINERS = 20
 MAX_TARE_EVENTS = 20
@@ -206,6 +208,116 @@ def _numbers_close(value: float, target: float) -> bool:
         QTY_TOLERANCE, abs(target) * 0.02)
 
 
+def normalize_proposal_draft(
+        parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Apply lossless deterministic repairs to a fusion draft.
+
+    1. Over-long ingredient names are split into a primary
+       row name plus a full-name note in the basis.
+    2. Suggestions beyond MAX_SUGGESTIONS move into the
+       production notes, since both reach the chef as
+       review aids.
+
+    Returns one record per repair. Raises ProposalError when
+    a repair is impossible, so callers fail loudly instead of
+    truncating or discarding model output.
+
+    Descriptive fusion names carry the uncertainty note in a
+    trailing parenthetical ("white powder (audio describes as
+    flour)"). When the full name exceeds MAX_NAME_CHARS, the
+    primary becomes the row name and the complete original is
+    appended to the basis, which downstream display splits
+    again. Returns one record per adjusted row. Raises
+    ProposalError when a name cannot be shortened this way
+    or the basis budget is exhausted: callers must fail
+    loudly rather than truncate evidence.
+    """
+    from bakery_intelligence.recipe_export.labels import (
+        split_display_name,
+    )
+
+    adjusted: list[dict[str, Any]] = _normalize_names(
+        parsed, split_display_name)
+    adjusted.extend(_normalize_suggestions(parsed))
+    return adjusted
+
+
+def _normalize_names(
+        parsed: dict[str, Any],
+        split_display_name: Any) -> list[dict[str, Any]]:
+    adjusted: list[dict[str, Any]] = []
+    ingredients = parsed.get("ingredients")
+    if not isinstance(ingredients, list):
+        return adjusted
+    for position, row in enumerate(ingredients):
+        if not isinstance(row, dict):
+            continue
+        name = _clean(row.get("name"))
+        if len(name) <= MAX_NAME_CHARS:
+            continue
+        primary, qualifier = split_display_name(name)
+        if (not qualifier
+                or len(primary) > MAX_NAME_CHARS
+                or not primary):
+            raise ProposalError(
+                f"Ingredient row {position} name exceeds "
+                f"{MAX_NAME_CHARS} characters and has no "
+                "splittable qualifier.")
+        basis = _clean(row.get("basis"))
+        full = f"{basis} Full recorded name: {name}."
+        if len(full) > MAX_BASIS_CHARS:
+            raise ProposalError(
+                f"Ingredient row {position} name exceeds "
+                f"{MAX_NAME_CHARS} characters and the basis "
+                "budget is exhausted.")
+        row["name"] = primary
+        row["basis"] = full
+        adjusted.append({"kind": "name_split", "row": position,
+                         "name": primary,
+                         "original_chars": len(name)})
+    return adjusted
+
+
+def _normalize_suggestions(
+        parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    adjusted: list[dict[str, Any]] = []
+    suggestions = parsed.get("suggestions")
+    if not isinstance(suggestions, list):
+        return adjusted
+    if len(suggestions) <= MAX_SUGGESTIONS:
+        return adjusted
+    notes = parsed.get("notes")
+    if not isinstance(notes, list):
+        raise ProposalError(
+            "Suggestion overflow cannot move: notes is not "
+            "a list.")
+    overflow = suggestions[MAX_SUGGESTIONS:]
+    if len(notes) + len(overflow) > MAX_NOTES:
+        raise ProposalError(
+            "Suggestion overflow exceeds the notes budget.")
+    for item in overflow:
+        if not isinstance(item, dict):
+            raise ProposalError(
+                "A suggestion is not an object.")
+        label = _clean(item.get("label"))
+        hint = _clean(item.get("hint"))
+        placeholder = _clean(item.get("placeholder"))
+        if not label or not hint or not placeholder:
+            raise ProposalError(
+                "An overflow suggestion is incomplete.")
+        note = ("Suggestion %r: %s. %s (%s)" % (
+            item.get("id"), label, hint, placeholder))
+        if len(note) > 500:
+            raise ProposalError(
+                "An overflow suggestion exceeds the note "
+                "budget.")
+        notes.append(note)
+        adjusted.append({"kind": "suggestion_overflow",
+                         "id": item.get("id")})
+    del suggestions[MAX_SUGGESTIONS:]
+    return adjusted
+
+
 def validate_proposal(bundle: dict[str, Any],
                       parsed: Any) -> dict[str, Any]:
     """Enforce shape, provenance, and reading-grounded quantities."""
@@ -248,9 +360,14 @@ def validate_proposal(bundle: dict[str, Any],
             raise ProposalError(
                 f"Ingredient row {position} is not an object.")
         name = _clean(row.get("name"))
-        if not name or len(name) > 120:
+        if not name:
             raise ProposalError(
                 f"Ingredient row {position} needs a name.")
+        if len(name) > MAX_NAME_CHARS:
+            raise ProposalError(
+                f"Ingredient row {position} name exceeds "
+                f"{MAX_NAME_CHARS} characters "
+                f"({len(name)}).")
         key = name.lower()
         if key in seen_ids:
             raise ProposalError(

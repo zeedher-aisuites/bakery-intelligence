@@ -304,13 +304,14 @@ function Landing(props: {
                     {!hideName && (
                       <strong>{item.display_name}</strong>
                     )}
-                    <span className="muted small">
-                      {`Version ${item.version_number}`}
-                      {" · "}
-                      {versionKindLabel(item)}
+                    <span className="version-badge">
+                      {`v${item.version_number}`}
                       {item.is_latest ? " · Latest" : ""}
+                    </span>
+                    <span className="muted small">
+                      {versionKindLabel(item)}
                       {item.parent_version_number !== null
-                        ? ` · Based on Version `
+                        ? ` · Based on v`
                           + `${item.parent_version_number}`
                         : ""}
                     </span>
@@ -343,14 +344,20 @@ function Landing(props: {
                   <div className="family-head">
                     <div>
                       <strong>{latest.display_name}</strong>
-                      <span className="muted small">
-                        {family.length === 1
-                          ? "Version 1"
-                          : `${family.length} versions`}
-                        {" · Latest: Version "
-                          }{latest.version_number}
+                      <span className="version-badge">
+                        {`v${latest.version_number} · Latest`}
                       </span>
+                      {family.length > 1 && (
+                        <span className="muted small">
+                          {`${family.length} versions`}
+                        </span>
+                      )}
                     </div>
+                  </div>
+                  <ul className="family-versions">
+                    {renderRow(latest, true)}
+                  </ul>
+                  <div className="family-foot">
                     <button
                       type="button"
                       className="btn-ghost"
@@ -360,9 +367,6 @@ function Landing(props: {
                       View Recipe
                     </button>
                   </div>
-                  <ul className="family-versions">
-                    {renderRow(latest, true)}
-                  </ul>
                   {older.length > 0 && (
                     <details className="family-history">
                       <summary>

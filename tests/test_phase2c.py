@@ -72,7 +72,7 @@ def test_prompt_versions_pinned_and_validated():
     assert versions["agent-a-global-culinary-analyst"] == "v1.0"
     assert versions["culinary-completion-specialist"] == "v1.0"
     assert versions["recipe-revision-specialist"] == "v1.0"
-    assert versions["recipe-proposal-specialist"] == "v1.1"
+    assert versions["recipe-proposal-specialist"] == "v1.2"
     assert versions["evidence-validator"] == "v1.0"
     assert len(versions) == 11
     assert prompts.validate_output(
