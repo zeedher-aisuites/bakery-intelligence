@@ -43,11 +43,20 @@ workflow validation is available as a GitHub Release asset:
 [bakery_chef_full_production.mp4](https://github.com/zeedher-aisuites/bakery-intelligence/releases/download/v1.0.0-hackathon/bakery_chef_full_production.mp4)
 
 Download it and upload it through the New Recipe workflow to
-reproduce the end-to-end analysis. The repository
-intentionally does not track the MP4, and the application
-ships without precomputed results. Executing the analysis
-requires supported provider credentials and may incur
-inference costs.
+reproduce the end-to-end analysis. The original production
+input video is distributed as a GitHub Release asset rather
+than tracked in the Git repository; the final product
+demonstration above is the only MP4 tracked under
+docs/demo/. The application ships without precomputed
+results. Executing the analysis requires supported provider
+credentials and may incur inference costs.
+
+The production footage was voluntarily provided by a local
+food business with authorization for research, development,
+public demonstration, and distribution in connection with
+the Bakery Intelligence project. It is independent of the
+EPIC-KITCHENS dataset (see Research Acknowledgments) and
+is not public-domain material.
 
 ## Problem
 
@@ -404,8 +413,9 @@ confirmed.
   (git-ignored); they are never printed, persisted in artifacts,
   or passed via argv by the provided tooling.
 - Videos, frames, transcripts, and inference outputs stay local
-  under git-ignored `runs_api/`; the repository ships no user
-  media or generated results.
+  under git-ignored `runs_api/`; apart from the intentionally
+  published product demonstration under `docs/demo/`, the
+  repository ships no user media or generated results.
 - The EPIC-KITCHENS sample footage referenced by early
   experiments carries noncommercial constraints; do not
   redistribute dataset media.
@@ -436,3 +446,39 @@ confirmed.
 - `docs/backup-system.md` — backup and restore procedures.
 - `experiments/` — per-experiment notes; each states whether
   its approach is integrated, superseded, or standalone.
+
+## Research Acknowledgments
+
+### EPIC-KITCHENS
+
+Early research and exploratory experiments for Bakery
+Intelligence used material from the EPIC-KITCHENS-100 dataset
+to investigate egocentric video understanding, temporal
+observations, digital-scale reading, and evidence-based
+recipe reconstruction (see
+`docs/datasets/epic_kitchens_100_selection.md` and
+`docs/experiments/003_video_to_recipe.md`).
+
+We acknowledge the EPIC-KITCHENS research team and dataset
+contributors for making this research resource available.
+
+The EPIC-KITCHENS material supported early experimentation
+and methodology development. The final Bakery Intelligence
+product demonstration uses separate bakery production footage
+and should not be interpreted as an EPIC-KITCHENS dataset
+demonstration.
+
+EPIC-KITCHENS footage is not redistributed in this
+repository. Original dataset licensing, access conditions,
+and attribution requirements remain applicable.
+
+Official project: https://epic-kitchens.github.io/
+
+Dataset and annotations:
+https://github.com/epic-kitchens/epic-kitchens-100-annotations
+
+Citation: Damen, D., Doughty, H., Farinella, G. M.,
+Furnari, A., Ma, J., Kazakos, E., Moltisanti, D., Munro,
+J., Perrett, T., Price, W., & Wray, M. (2022). _Rescaling
+Egocentric Vision_. International Journal of Computer
+Vision, 130, 33-55. https://arxiv.org/abs/2006.13256
